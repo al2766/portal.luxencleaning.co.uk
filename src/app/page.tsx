@@ -214,7 +214,7 @@ function LoginCard() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4">
+    <div className="mt-[6em] flex items-center justify-center px-4">
       <div className="bg-white shadow-lg rounded-2xl p-6 md:p-8 w-full max-w-md">
         <h1 className="text-2xl font-bold text-center text-[#0071bc] mb-2">
           Welcome back
