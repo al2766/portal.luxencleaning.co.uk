@@ -63,16 +63,18 @@ export default function CreateAccountPage() {
       // operational fields will be added later from the “Complete your profile” flow
     };
 
-    // Write both docs; if one fails, throw a helpful error
+    // Write both docs with NAME as the doc id
+    const safeId = name.replace(/[.#$/[\]]+/g, '_').trim() || uid;
+
     try {
-      await setDoc(doc(db, 'users', uid), baseUser, { merge: true });
+      await setDoc(doc(db, 'users', safeId), { ...baseUser }, { merge: true });
     } catch (e: any) {
-      throw new Error(`Failed to write users/${uid}: ${e?.message || e}`);
+      throw new Error(`Failed to write users/${safeId}: ${e?.message || e}`);
     }
     try {
-      await setDoc(doc(db, 'staff', uid), staffDoc, { merge: true });
+      await setDoc(doc(db, 'staff', safeId), { ...staffDoc }, { merge: true });
     } catch (e: any) {
-      throw new Error(`Failed to write staff/${uid}: ${e?.message || e}`);
+      throw new Error(`Failed to write staff/${safeId}: ${e?.message || e}`);
     }
   };
 
@@ -184,7 +186,7 @@ export default function CreateAccountPage() {
       </div>
 
       <p className="mt-3 text-xs text-gray-500">
-        Using Firebase project: <span className="font-mono">{app.options.projectId || '(unknown)'}</span>
+        Using Firebase projectt: <span className="font-mono">{app.options.projectId || '(unknown)'}</span>
       </p>
     </div>
   );

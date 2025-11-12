@@ -11,6 +11,14 @@ import dynamic from 'next/dynamic';
 import 'leaflet/dist/leaflet.css';
 import type { MapContainerProps, TileLayerProps, CircleProps } from 'react-leaflet';
 
+const staffRate = 12.21; // £/hour
+
+const currency = new Intl.NumberFormat('en-GB', {
+  style: 'currency',
+  currency: 'GBP',
+  maximumFractionDigits: 2,
+});
+
 const MapContainer = dynamic<MapContainerProps>(
   () => import('react-leaflet').then(m => m.MapContainer),
   { ssr: false }
@@ -24,6 +32,12 @@ const Circle = dynamic<CircleProps>(
   { ssr: false }
 );
 
+type Address =
+  | string
+  | {
+      line1?: string; line2?: string; town?: string; county?: string; postcode?: string;
+    };
+
 type BookingDoc = {
   orderId: string;
   date: string;
@@ -32,9 +46,7 @@ type BookingDoc = {
   totalPrice?: number;
   customerName?: string;
   customerPhone?: string;
-  address?: {
-    line1?: string; line2?: string; town?: string; county?: string; postcode?: string;
-  } | string;
+  address?: Address;
   bedrooms?: number | string;
   bathrooms?: number | string;
   livingRooms?: number | string;
@@ -44,8 +56,15 @@ type BookingDoc = {
   estimatedHours?: number;
   cleanliness?: string;
   serviceType?: string;
+
+  // legacy single fields
   assignedStaffId?: string | null;
   assignedStaffName?: string | null;
+
+  // two-cleaner support
+  twoCleaners?: boolean;
+  assignedStaffIds?: string[];
+  assignedStaffNames?: string[];
 };
 
 type Job = {
@@ -69,58 +88,85 @@ const defaultAvailability: Availability = {
 };
 
 function milesToMeters(mi: number) { return mi * 1609.34; }
-function radiusToZoom(mi: number): number {
-  if (mi <= 2) return 13;
-  if (mi <= 4) return 12;
-  if (mi <= 8) return 11;
-  if (mi <= 16) return 10;
-  if (mi <= 32) return 9;
-  return 8;
+
+// NEW: compute bounding box for a circle in miles, for auto fit
+function circleBoundsFromMiles(center: [number, number], miles: number) {
+  const [lat, lon] = center;
+  const meters = miles * 1609.34;
+  const dLat = meters / 111_320; // rough meters per degree latitude
+  const dLon = meters / (111_320 * Math.cos((lat * Math.PI) / 180) || 1);
+  const south = lat - dLat;
+  const north = lat + dLat;
+  const west = lon - dLon;
+  const east = lon + dLon;
+  return [
+    [south, west],
+    [north, east],
+  ] as [[number, number], [number, number]];
 }
 
 type LeafletMapLike = {
   setView: (center: [number, number], zoom: number) => void;
   setZoom: (zoom: number) => void;
+  // NEW: add fitBounds so TS is happy
+  fitBounds?: (bounds: [[number, number], [number, number]], options?: any) => void;
 };
+
+function formatUKDate(dateStr: string): string {
+  if (!dateStr) return '';
+  const [year, month, day] = dateStr.split('-');
+  const date = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+  return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+// helpers for two-cleaner model (works with legacy fields)
+function getAssignedIds(job: BookingDoc): string[] {
+  if (Array.isArray(job.assignedStaffIds) && job.assignedStaffIds.length) return job.assignedStaffIds.filter(Boolean) as string[];
+  return job.assignedStaffId ? [job.assignedStaffId] : [];
+}
+function getAssignedNames(job: BookingDoc): string[] {
+  if (Array.isArray(job.assignedStaffNames) && job.assignedStaffNames.length) return job.assignedStaffNames.filter(Boolean) as string[];
+  return job.assignedStaffName ? [job.assignedStaffName] : [];
+}
+function requiredCleaners(job: BookingDoc): number {
+  return job.twoCleaners ? 2 : 1;
+}
 
 export default function Jobs() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [uid, setUid] = useState<string | null>(auth.currentUser?.uid ?? null);
 
-  // profile gate (unchanged idea)
   const [needsProfile, setNeedsProfile] = useState<boolean>(false);
   const [checkedProfile, setCheckedProfile] = useState<boolean>(false);
 
-  // wizard bits (kept so your UI remains the same)
   const [homePostcode, setHomePostcode] = useState('');
   const [radiusMiles, setRadiusMiles] = useState<number>(10);
   const [minNoticeHours, setMinNoticeHours] = useState<number>(12);
   const [travelBufferMins, setTravelBufferMins] = useState<number>(30);
   const [availability, setAvailability] = useState<Availability>(defaultAvailability);
 
-  const [hasCar, setHasCar] = useState<boolean>(false);
-  const [bringsSupplies, setBringsSupplies] = useState<boolean>(false);
+  const [hasCar, setHasCar] = useState<boolean | null>(null);
+  const [bringsSupplies, setBringsSupplies] = useState<boolean | null>(null);
+  const [teamJobs, setTeamJobs] = useState<boolean | null>(null);
   const [equipment, setEquipment] = useState<string[]>([]);
   const [pets, setPets] = useState<string[]>([]);
   const [services, setServices] = useState<string[]>([]);
-  const [teamJobs, setTeamJobs] = useState<boolean>(true);
   const [rightToWorkUk, setRightToWorkUk] = useState<boolean>(false);
   const [dateOfBirth, setDateOfBirth] = useState<string>('');
   const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string>('');
 
-  // map state (unchanged)
   const [mapCenter, setMapCenter] = useState<[number, number] | null>(null);
   const [geoLoading, setGeoLoading] = useState(false);
   const mapRef = useRef<LeafletMapLike | null>(null);
 
-  // 🔵 NEW: auto-assign setting from Firestore
   const [autoAssign, setAutoAssign] = useState<boolean>(true);
+
+  const [viewJob, setViewJob] = useState<Job | null>(null);
 
   useEffect(() => onAuthStateChanged(auth, (u) => setUid(u?.uid ?? null)), []);
 
-  // Listen to bookings (unchanged)
   useEffect(() => {
     const ref = collection(db, 'bookings');
     const q = query(ref, orderBy('date', 'asc'));
@@ -142,24 +188,22 @@ export default function Jobs() {
     return unsub;
   }, []);
 
-  // 🔵 Subscribe to settings/general for autoAssign
   useEffect(() => {
     const sref = doc(db, 'settings', 'general');
     const unsub = onSnapshot(sref, (snap) => {
       const data = snap.data() as { autoAssign?: boolean } | undefined;
       setAutoAssign(Boolean(data?.autoAssign));
-    }, () => setAutoAssign(true)); // default true if missing
+    }, () => setAutoAssign(true));
     return unsub;
   }, []);
 
-  // ------- profile check (keep your gating but simpler) -------
   const checkProfile = useCallback(async (userId: string) => {
     try {
       const sref = doc(db, 'staff', userId);
       const snap = await getDoc(sref);
       const staff = snap.exists() ? (snap.data() as Record<string, unknown>) : {};
       const pc = String(staff?.['homePostcode'] ?? '').trim();
-      setNeedsProfile(!pc);  // gate mainly on postcode as you asked earlier
+      setNeedsProfile(!pc);
     } catch {
       setNeedsProfile(true);
     } finally {
@@ -173,7 +217,6 @@ export default function Jobs() {
     checkProfile(uid);
   }, [uid, checkProfile]);
 
-  // ------- validation for wizard (unchanged except notice input already numeric) -------
   function isPostcodeUKish(v: string) {
     return /^[A-Za-z]{1,2}\d[A-Za-z\d]?\s?\d[A-Za-z]{2}$/.test(v.trim());
   }
@@ -202,6 +245,25 @@ export default function Jobs() {
         }
         return '';
       }
+      case 5:
+        return hasCar !== null ? '' : 'Please select yes or no.';
+      case 6:
+        return bringsSupplies !== null ? '' : 'Please select yes or no.';
+      case 7:
+        if (bringsSupplies === true) {
+          return Array.isArray(equipment) && equipment.length > 0
+            ? ''
+            : 'Please select at least one equipment option.';
+        }
+        return '';
+      case 8:
+        return '';
+      case 9:
+        return Array.isArray(services) && services.length > 0
+          ? ''
+          : 'Please select at least one service you can do.';
+      case 10:
+        return teamJobs !== null ? '' : 'Please select yes or no.';
       case 11:
         return rightToWorkUk ? '' : 'You must confirm you have the right to work in the UK.';
       case 12:
@@ -211,13 +273,29 @@ export default function Jobs() {
       default:
         return '';
     }
-  }, [step, homePostcode, radiusMiles, minNoticeHours, travelBufferMins, availability, rightToWorkUk, dateOfBirth]);
+  }, [step, homePostcode, radiusMiles, minNoticeHours, travelBufferMins, availability, hasCar, bringsSupplies, equipment, pets, services, teamJobs, rightToWorkUk, dateOfBirth]);
 
   const isValid = !stepError;
-  const next = () => { setErr(''); if (!isValid) return; setStep((s) => Math.min(s + 1, 12)); };
-  const back = () => { setErr(''); setStep((s) => Math.max(s - 1, 0)); };
+  const next = () => { 
+    setErr(''); 
+    if (!isValid) return; 
+    if (step === 6 && bringsSupplies === false) {
+      setEquipment([]);
+      setStep((s) => Math.min(s + 2, 12));
+    } else {
+      setStep((s) => Math.min(s + 1, 12));
+    }
+  };
 
-  // geocode preview for map (unchanged behavior)
+  const back = () => { 
+    setErr(''); 
+    if (step === 8 && bringsSupplies === false) {
+      setStep((s) => Math.max(s - 2, 0));
+    } else {
+      setStep((s) => Math.max(s - 1, 0));
+    }
+  };
+
   useEffect(() => {
     async function geocode() {
       if (!isPostcodeUKish(homePostcode)) { setMapCenter(null); return; }
@@ -230,7 +308,14 @@ export default function Jobs() {
           const { lat, lon } = json[0];
           const center: [number, number] = [parseFloat(lat), parseFloat(lon)];
           setMapCenter(center);
-          setTimeout(() => { if (mapRef.current) mapRef.current.setView(center, radiusToZoom(radiusMiles)); }, 0);
+          // Smooth fit after setting center
+          setTimeout(() => {
+            if (mapRef.current && mapRef.current.fitBounds && center) {
+              const bounds = circleBoundsFromMiles(center, radiusMiles);
+              // @ts-ignore leaflet options typing
+              mapRef.current.fitBounds(bounds, { padding: [24, 24], animate: true, duration: 0.8 });
+            }
+          }, 0);
         } else {
           setMapCenter(null);
         }
@@ -241,17 +326,22 @@ export default function Jobs() {
       }
     }
     geocode();
-  }, [homePostcode, radiusMiles]);
+    // postcode change triggers a refit (radius change handled in separate effect)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [homePostcode]);
+
+  // Smoothly refit whenever miles changes (and we have a center)
+  useEffect(() => {
+    if (!mapRef.current || !mapCenter || !mapRef.current.fitBounds) return;
+    const bounds = circleBoundsFromMiles(mapCenter, radiusMiles);
+    // @ts-ignore leaflet options typing
+    mapRef.current.fitBounds(bounds, { padding: [24, 24], animate: true, duration: 0.8 });
+  }, [mapCenter, radiusMiles]);
 
   const bumpRadius = (delta: number) => {
-    setRadiusMiles(prev => {
-      const next = Math.max(1, Math.min(50, Math.round(prev + delta)));
-      if (mapRef.current) mapRef.current.setZoom(radiusToZoom(next));
-      return next;
-    });
+    setRadiusMiles(prev => Math.max(1, Math.min(50, Math.round(prev + delta))));
   };
 
-  // save profile (unchanged except types)
   const save = async () => {
     if (!isValid || !uid) return;
     try {
@@ -279,12 +369,12 @@ export default function Jobs() {
         minNoticeHours: Number(minNoticeHours),
         travelBufferMins: Number(travelBufferMins),
         availability: lower,
-        hasCar,
-        bringsSupplies,
+        hasCar: hasCar === true,
+        bringsSupplies: bringsSupplies === true,
         equipment,
         pets,
         services,
-        teamJobs,
+        teamJobs: teamJobs === true,
         rightToWorkUk,
         dateOfBirth: dateOfBirth || null,
         updatedAt: new Date().toISOString(),
@@ -307,14 +397,18 @@ export default function Jobs() {
     }
   };
 
-  // 🔵 NEW: visibility
+  // unassigned = not fully staffed yet
   const visibleUnassignedJobs = useMemo(() => {
     if (!uid) return [];
-    if (!autoAssign) return []; // when OFF, staff see no unassigned jobs
-    return jobs.filter(j => !j.assignedStaffId);
+    if (!autoAssign) return [];
+    return jobs.filter(j => getAssignedIds(j).length < requiredCleaners(j));
   }, [jobs, uid, autoAssign]);
 
-  const myJobs = useMemo(() => jobs.filter(j => j.assignedStaffId === uid), [jobs, uid]);
+  // my jobs = I'm in assigned list
+  const myJobs = useMemo(() => {
+    if (!uid) return [];
+    return jobs.filter(j => getAssignedIds(j).includes(uid));
+  }, [jobs, uid]);
 
   const getErrorMessage = (e: unknown): string =>
     typeof e === 'string'
@@ -323,13 +417,37 @@ export default function Jobs() {
       ? (e as { message?: string }).message!
       : 'Unexpected error';
 
+  // self-assign supporting 2 cleaners
   const assignToMe = async (jobId: string) => {
     if (!uid) return alert('Not signed in');
     try {
       const dref = doc(db, 'bookings', jobId);
+      const snap = await getDoc(dref);
+      if (!snap.exists()) throw new Error('Booking not found');
+      const data = snap.data() as BookingDoc;
+
+      const need = requiredCleaners(data);
+      const ids = getAssignedIds(data);
+      const names = getAssignedNames(data);
+
+      if (ids.includes(uid)) {
+        alert('You are already assigned to this job.');
+        return;
+      }
+      if (ids.length >= need) {
+        alert('This job already has the required cleaners.');
+        return;
+      }
+
+      const nextIds = [...ids, uid].slice(0, need);
+      const myName = auth.currentUser?.displayName || 'Staff Member';
+      const nextNames = [...names, myName].slice(0, need);
+
       await updateDoc(dref, {
-        assignedStaffId: uid,
-        assignedStaffName: auth.currentUser?.email || 'Staff Member',
+        assignedStaffIds: nextIds,
+        assignedStaffNames: nextNames,
+        assignedStaffId: nextIds[0] ?? null,
+        assignedStaffName: nextNames[0] ?? null,
       });
     } catch (e) {
       console.error(e);
@@ -337,47 +455,293 @@ export default function Jobs() {
     }
   };
 
-  const removeFromMe = async (jobId: string) => {
-    if (!uid) return;
-    try {
-      const dref = doc(db, 'bookings', jobId);
-      await updateDoc(dref, { assignedStaffId: null, assignedStaffName: null });
-    } catch (e) {
-      console.error(e);
-      alert(getErrorMessage(e) || 'Failed to remove job');
-    }
-  };
+  // checklist PDF (staff pay + assigned cleaners)
+  async function downloadChecklist(job: Job) {
+    const { jsPDF } = await import('jspdf');
+
+    const A4_W = 595.28;
+    const A4_H = 841.89;
+    const M = 48;
+
+    const BLUE = '#0a66b2';
+
+    const BODY_SIZE = 8.8;
+    const LINE_STEP = 15.5;
+    const TITLE_SIZE = 13;
+    const SUBTITLE_SIZE = 10.2;
+    const MAIN_TITLE_SIZE = 21;
+
+    const HR_GAP = 22;
+    const TITLE_GAP = HR_GAP;
+    const SECTION_GAP = 12;
+    const ROW_GAP = 12;
+
+    const BOX = 8;
+
+    const STAFF_RATE = staffRate;
+
+    const money = new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', maximumFractionDigits: 2 });
+
+    const fmtLongDate = (ymd: string) => {
+      const [yy, mm, dd] = (ymd || '').split('-').map(Number);
+      const dt = new Date(yy, (mm || 1) - 1, dd || 1);
+      return dt.toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' });
+    };
+
+    const loadImage = (src: string) =>
+      new Promise<HTMLImageElement>((resolve, reject) => {
+        const im = new Image();
+        im.crossOrigin = 'anonymous';
+        im.onload = () => resolve(im);
+        im.onerror = reject;
+        im.src = src;
+      });
+
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    let y = M;
+
+    const set = (
+      font = 'helvetica',
+      style: 'normal' | 'bold' | 'italic' = 'normal',
+      size = BODY_SIZE,
+      color = '#111'
+    ) => {
+      doc.setFont(font, style);
+      doc.setFontSize(size);
+      doc.setTextColor(color);
+    };
+    const hr = () => {
+      doc.setDrawColor('#cfd8e3');
+      doc.line(M, y, A4_W - M, y);
+    };
+    const split = (text: string, maxW: number) => doc.splitTextToSize(text, maxW);
+
+    const logo = await loadImage('/logo.png');
+    const LOGO_H = 120;
+    const logoW = (logo.width / logo.height) * LOGO_H;
+    const headerCenterY = y + LOGO_H / 2;
+
+    doc.addImage(logo, 'PNG', M, y, logoW, LOGO_H);
+
+    const titleX = M + logoW + 18;
+    set('helvetica', 'bold', MAIN_TITLE_SIZE, BLUE);
+    doc.text('LUXEN CLEANING', titleX, headerCenterY - 8);
+    set('helvetica', 'normal', SUBTITLE_SIZE, '#111');
+    doc.text('Standard Home Cleaning Checklist', titleX, headerCenterY + 10);
+
+    y += LOGO_H + 10;
+    hr();
+    y += HR_GAP;
+
+    set('helvetica', 'bold', TITLE_SIZE, BLUE);
+    doc.text('Customer Details', M, y);
+
+    const detailGap = 16;
+    const innerW = A4_W - 2 * M;
+    const leftW = innerW * 0.30;
+    const rightW = innerW * 0.70 - detailGap;
+
+    const L = M;
+    const R = M + leftW + detailGap;
+
+    doc.text('Job Details', R, y);
+    y += TITLE_GAP;
+
+    const kvInline = (x: number, yy: number, label: string, value: string | number | undefined, width: number) => {
+      set('helvetica', 'normal', BODY_SIZE, '#111');
+      const wrapped = split(`${label}: ${value ?? '—'}`, width);
+      doc.text(wrapped, x, yy);
+      const lines = Array.isArray(wrapped) ? wrapped.length : 1;
+      return yy + Math.max(LINE_STEP, LINE_STEP * lines);
+    };
+
+    const custName = job.customerName || 'Customer';
+    const addr =
+      typeof job.address === 'string'
+        ? job.address
+        : [job.address?.line1, job.address?.line2, job.address?.town, job.address?.county, job.address?.postcode]
+            .filter(Boolean)
+            .join(', ');
+    let yL = y;
+    yL = kvInline(L, yL, 'Customer', custName, leftW);
+    yL = kvInline(L, yL, 'Address', addr || '—', leftW);
+    yL = kvInline(L, yL, 'Phone', job.customerPhone || '—', leftW);
+
+    const showTime = job.displayTime || job.startTime || '—';
+    const hours = Number(job.estimatedHours ?? 0) || 0;
+    const pay = hours > 0 ? money.format(hours * STAFF_RATE) : '—';
+    const cleaners = getAssignedNames(job).join(', ') || '—';
+
+    const roomsLine = [
+      `${Number(job.bedrooms ?? 0)} bed`,
+      `${Number(job.bathrooms ?? 0)} bath`,
+      `${Number(job.livingRooms ?? 0)} living`,
+      `${Number(job.kitchens ?? 0)} kitchen`,
+    ].join(' · ');
+
+    let yR = y;
+    yR = kvInline(R, yR, 'Date', job.date ? fmtLongDate(job.date) : '—', rightW);
+    yR = kvInline(R, yR, 'Time', showTime, rightW);
+    yR = kvInline(R, yR, 'Service', job.serviceType || 'Cleaning Service', rightW);
+    yR = kvInline(R, yR, 'Rooms', roomsLine, rightW);
+    yR = kvInline(R, yR, 'Cleanliness', job.cleanliness || '—', rightW);
+    yR = kvInline(R, yR, 'Estimated Hours', hours ? String(hours) : '—', rightW);
+    yR = kvInline(R, yR, 'Assigned Cleaners', cleaners, rightW);
+    yR = kvInline(R, yR, 'Your Pay', pay, rightW);
+
+    y = Math.max(yL, yR) + 8;
+    hr();
+    y += HR_GAP;
+
+    const checkboxLine = (x: number, yy: number, text: string, width: number) => {
+      const rectY = yy - BOX + BODY_SIZE * 0.48;
+      doc.setDrawColor(0);
+      doc.setFillColor(255, 255, 255);
+      doc.rect(x, rectY, BOX, BOX, 'FD');
+
+      set('helvetica', 'normal', BODY_SIZE, '#111');
+      const wrapped = split(text, width - (BOX + 12));
+      doc.text(wrapped, x + BOX + 7, yy);
+
+      const lines = Array.isArray(wrapped) ? wrapped.length : 1;
+      return yy + Math.max(LINE_STEP, LINE_STEP * lines);
+    };
+
+    const section = (title: string, items: string[], x: number, yy: number, width: number) => {
+      set('helvetica', 'bold', TITLE_SIZE, BLUE);
+      doc.text(title, x, yy);
+      yy += TITLE_GAP;
+      let cur = yy;
+      for (const it of items) cur = checkboxLine(x, cur, it, width);
+      return cur + SECTION_GAP;
+    };
+
+    const colGap2 = 28;
+    const colW2 = (A4_W - M * 2 - colGap2) / 2;
+
+    const entry_items = [
+      'Put on shoe covers (if required)',
+      'Knock, greet politely, confirm job scope & time',
+      'Place equipment neatly by the entrance',
+      'Tidy shoes/coats if asked; clear floor area',
+      'Vacuum/mop floors; wipe skirting boards and door handles',
+    ];
+    const kitchen_items = [
+      'Load/unload dishwasher if asked; wash remaining dishes',
+      'Wipe worktops, splashbacks, cupboard doors and handles',
+      'Clean hob and front of oven; wipe appliances (kettle, microwave)',
+      'Empty bins & replace liners; take rubbish out (if instructed)',
+      'Vacuum/mop floor; leave sink & taps shining',
+    ];
+    const bathroom_items = [
+      'Spray & clean toilet (top to bottom) and base',
+      'Clean sink, taps, plugholes & polish mirrors',
+      'Wipe shower/bath, screen/tiles; rinse & squeegee',
+      'Wipe light switches, door handles & skirting',
+      'Vacuum/mop floor; leave surfaces dry & tidy',
+    ];
+    const bedroom_items = [
+      'Tidy surfaces; dust reachable areas and skirting',
+      'Make bed/change bedding if clean bedding provided',
+      'Wipe mirrors & glass surfaces',
+      'Empty small bins (if present)',
+      'Vacuum/mop floors; check under bed reachable area',
+    ];
+    const living_items = [
+      'Tidy and dust surfaces, TV stand, shelves (reachable)',
+      'Wipe coffee table and reachable glass',
+      'Fluff cushions & fold throws neatly',
+      'Wipe light switches, door handles & skirting',
+      'Vacuum/mop floors and visible edges',
+    ];
+    const finish_items = [
+      'Walk-through with customer (if present) & confirm satisfaction',
+      'Check lights off, windows closed (unless instructed)',
+      'Take rubbish/recycling out if instructed',
+      'Pack equipment, leave entry tidy',
+      'Note any damages/issues in app/notes',
+    ];
+
+    let yL1 = section('Entry & Hallway', entry_items, M, y, colW2);
+    let yR1 = section('Kitchen',        kitchen_items, M + colW2 + colGap2, y, colW2);
+    y = Math.max(yL1, yR1) + ROW_GAP;
+
+    let yL2 = section('Bathrooms', bathroom_items, M, y, colW2);
+    let yR2 = section('Bedrooms',  bedroom_items,  M + colW2 + colGap2, y, colW2);
+    y = Math.max(yL2, yR2) + ROW_GAP;
+
+    let yL3 = section('Living Areas', living_items, M, y, colW2);
+    let yR3 = section('Finishing Up', finish_items, M + colW2 + colGap2, y, colW2);
+    y = Math.max(yL3, yR3);
+
+    const footerY = Math.min(A4_H - 22, y + 20);
+    set('helvetica', 'italic', 9, '#555');
+    doc.text('Thank you for choosing Luxen Cleaning.', M, footerY);
+
+    const pc = typeof job.address === 'string' ? '' : (job.address?.postcode ?? '');
+    doc.save(`${job.customerName ?? 'Customer'} (${pc}) Checklist.pdf`);
+  }
 
   const inputCls =
     'w-full h-11 px-3 rounded-lg border border-gray-300 bg-white text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#0071bc]/30 focus:border-[#0071bc]';
 
   const setDay = (day: DayName, field: keyof DayAvail, value: DayAvail[typeof field]) => {
-  setAvailability(prev => {
-    const cur = prev[day];
-    if (field === 'available') {
-      const makeOn = Boolean(value);
-      return {
-        ...prev,
-        [day]: {
-          available: makeOn,
-          from: makeOn ? (cur.from || '07:00') : '',
-          to:   makeOn ? (cur.to   || '20:00') : '',
-        },
-      };
-    }
-    return { ...prev, [day]: { ...cur, [field]: value } };
-  });
-};
-
+    setAvailability(prev => {
+      const cur = prev[day];
+      if (field === 'available') {
+        const makeOn = Boolean(value);
+        return {
+          ...prev,
+          [day]: {
+            available: makeOn,
+            from: makeOn ? (cur.from || '07:00') : '',
+            to:   makeOn ? (cur.to   || '20:00') : '',
+          },
+        };
+      }
+      return { ...prev, [day]: { ...cur, [field]: value } };
+    });
+  };
 
   const toggleIn = (list: string[], value: string, setter: (v: string[]) => void) => {
     setter(list.includes(value) ? list.filter(v => v !== value) : [...list, value]);
   };
 
-  // ====== RENDER ======
+  const payText = (j: Job) => {
+    const hours = Number(j.estimatedHours ?? 0) || 0;
+    return hours ? currency.format(hours * staffRate) : '—';
+  };
+
+  const twoCleanerLine = (j: Job): string | null => {
+    if (!j.twoCleaners) return null;
+    console.log(j);
+    const ids = getAssignedIds(j);
+    const names = getAssignedNames(j);
+    if (ids.length >= 2) {
+      if (!uid) return 'Two-cleaner job';
+      const myIdx = ids.findIndex(x => x === uid);
+      const otherIdx = myIdx === 0 ? 1 : 0;
+      const other = names[otherIdx] || ids[otherIdx] || 'Second cleaner';
+      return `Also assigned: ${other}`;
+    }
+    return 'Awaiting second cleaner';
+  };
+
+  // small badge
+  const Tag = ({ children }: { children: React.ReactNode }) => (
+    <span className="px-2 py-1 rounded bg-gray-50 border text-xs text-gray-700">{children}</span>
+  );
+
+  // hours badge content
+  const hoursTag = (j: Job) => {
+    const h = Number(j.estimatedHours ?? 0) || 0;
+    return `Est: ${h || '—'} h`;
+  };
+
+ 
   return (
     <div className="space-y-8">
-      {/* PROFILE GATE */}
+      {/* PROFILE GATE (unchanged) */}
       {checkedProfile && needsProfile && (
         <section className="space-y-4">
           <div>
@@ -392,7 +756,6 @@ export default function Jobs() {
               </div>
             )}
 
-            {/* Header / controls */}
             <div className="flex items-center justify-between mb-3">
               <div className="text-sm font-medium text-gray-900">Step <span>{step + 1}</span> / 13</div>
               <div className="flex items-center gap-2">
@@ -430,7 +793,7 @@ export default function Jobs() {
               </div>
             </div>
 
-            {/* BODY (unchanged UI) */}
+            {/* BODY (unchanged fields) */}
             <div className="space-y-2">
               {step === 0 && (
                 <div>
@@ -462,7 +825,7 @@ export default function Jobs() {
                     {mapCenter && (
                       <MapContainer
                         center={mapCenter}
-                        zoom={radiusToZoom(radiusMiles)}
+                        zoom={12}
                         whenCreated={(m) => { mapRef.current = m as unknown as LeafletMapLike; }}
                         style={{ height: '100%', width: '100%' }}
                         scrollWheelZoom
@@ -527,8 +890,243 @@ export default function Jobs() {
                 </div>
               )}
 
-              {/* 5..12 UI kept as in your code (car, supplies, equipment, pets, services, teamJobs, rightToWork, DOB) */}
-              {/* ... */}
+              {step === 5 && (
+                <div>
+                  <div className="text-base font-semibold text-gray-900 mb-1">Do you have a car?</div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setHasCar(false)}
+                      className={`px-3 py-1.5 rounded border cursor-pointer ${
+                        hasCar === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                      }`}
+                    >
+                      No
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setHasCar(true)}
+                      className={`px-3 py-1.5 rounded border cursor-pointer ${
+                        hasCar === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                      }`}
+                    >
+                      Yes
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {step === 6 && (
+                <div>
+                  <div className="text-base font-semibold text-gray-900 mb-1">Do you have your own supplies?</div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setBringsSupplies(false)}
+                      className={`px-3 py-1.5 rounded border cursor-pointer ${
+                        bringsSupplies === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                      }`}
+                    >
+                      No
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBringsSupplies(true)}
+                      className={`px-3 py-1.5 rounded border cursor-pointer ${
+                        bringsSupplies === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                      }`}
+                    >
+                      Yes
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {step === 7 && bringsSupplies && (
+                <div>
+                  <div className="text-base font-semibold text-gray-900 mb-1">Which equipment can you bring?</div>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      ['vacuum','Vacuum cleaner'],
+                      ['mopBucket','Mop & bucket'],
+                      ['duster','Duster'],
+                      ['broomDustpan','Broom & dustpan'],
+                      ['microfibre','Microfibre cloths'],
+                      ['spotCleaner','Carpet spot cleaner (handheld)'],
+                      ['none','None of the above'],
+                    ].map(([key,label]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => {
+                          if (key === 'none') {
+                            setEquipment(['none']);
+                          } else {
+                            const next = equipment.includes('none') ? [] : [...equipment];
+                            if (next.includes(key)) {
+                              setEquipment(next.filter(k => k !== key));
+                            } else {
+                              setEquipment([...next, key]);
+                            }
+                          }
+                        }}
+                        className={`px-3 py-1.5 rounded border cursor-pointer ${
+                          equipment.includes(key) ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {step === 7 && !bringsSupplies && (
+                <div>
+                  <div className="text-base font-semibold text-gray-900 mb-1">Equipment</div>
+                  <p className="text-sm text-gray-700">You indicated you don't bring your own supplies, so we'll skip the equipment question.</p>
+                </div>
+              )}
+
+              {step === 8 && (
+                <div>
+                  <div className="text-base font-semibold text-gray-900 mb-1">Are you allergic to any animals?</div>
+                  <div className="space-y-3">
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setPets([])}
+                        className={`px-3 py-1.5 rounded border cursor-pointer ${
+                          pets.length === 0 ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                        }`}
+                      >
+                        No
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (pets.length === 0) setPets(['dogs']);
+                        }}
+                        className={`px-3 py-1.5 rounded border cursor-pointer ${
+                          pets.length > 0 ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                        }`}
+                      >
+                        Yes
+                      </button>
+                    </div>
+                    
+                    {pets.length > 0 && (
+                      <div>
+                        <p className="text-sm text-gray-700 mb-2">Select all animals you're allergic to:</p>
+                        <div className="flex flex-wrap gap-2">
+                          {[
+                            ['dogs','Dogs'],
+                            ['cats','Cats'],
+                            ['birds','Birds'],
+                            ['rabbits','Rabbits'],
+                            ['rodents','Rodents (hamsters, guinea pigs, etc.)'],
+                            ['reptiles','Reptiles'],
+                            ['horses','Horses'],
+                          ].map(([key,label]) => (
+                            <button
+                              key={key}
+                              type="button"
+                              onClick={() => {
+                                if (pets.includes(key)) {
+                                  const remaining = pets.filter(p => p !== key);
+                                  setPets(remaining.length > 0 ? remaining : [key]);
+                                } else {
+                                  setPets([...pets, key]);
+                                }
+                              }}
+                              className={`px-3 py-1.5 rounded border cursor-pointer ${
+                                pets.includes(key) ? 'border-[#0071bc] bg-[#0071bc] text-white' : 'border-gray-300 text-gray-800 hover:border-gray-400'
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                        <p className="text-xs text-gray-600 mt-2">Click to select/deselect. You can choose multiple.</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {step === 9 && (
+                <div>
+                  <div className="text-base font-semibold text-gray-900 mb-1">Services you can do</div>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      ['standard','Standard clean'],
+                      ['deep','Deep clean'],
+                      ['eot','End of tenancy / Move-out'],
+                      ['oven','Oven clean'],
+                      ['fridge','Fridge clean'],
+                      ['laundry','Laundry / Ironing'],
+                      ['spotClean','Carpet / Upholstery spot clean'],
+                    ].map(([key,label]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={()=>toggleIn(services, key, setServices)}
+                        className={`px-3 py-1.5 rounded border cursor-pointer ${
+                          services.includes(key) ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {step === 10 && (
+                <div>
+                  <div className="text-base font-semibold text-gray-900 mb-1">Okay with team jobs?</div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setTeamJobs(false)}
+                      className={`px-3 py-1.5 rounded border cursor-pointer ${
+                        teamJobs === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                      }`}
+                    >
+                      No
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTeamJobs(true)}
+                      className={`px-3 py-1.5 rounded border cursor-pointer ${
+                        teamJobs === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                      }`}
+                    >
+                      Yes
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {step === 11 && (
+                <div>
+                  <div className="text-base font-semibold text-gray-900 mb-1">Right to work in the UK</div>
+                  <p className="text-sm text-gray-800 mb-2">Confirm you're legally allowed to work in the UK. You may be asked to provide proof.</p>
+                  <label className="inline-flex items-center gap-2 text-gray-900">
+                    <input type="checkbox" className="h-4 w-4" checked={rightToWorkUk} onChange={(e)=>setRightToWorkUk(e.target.checked)} />
+                    I confirm I have the right to work in the UK
+                  </label>
+                </div>
+              )}
+
+              {step === 12 && (
+                <div>
+                  <div className="text-base font-semibold text-gray-900 mb-1">Date of birth</div>
+                  <input className={inputCls} type="date" value={dateOfBirth} onChange={(e)=>setDateOfBirth(e.target.value)} />
+                </div>
+              )}
+
+              {stepError && <p className="text-sm text-red-600">{stepError}</p>}
             </div>
           </div>
         </section>
@@ -540,28 +1138,85 @@ export default function Jobs() {
         <div className="space-y-4">
           {visibleUnassignedJobs.length === 0 ? (
             <p className="text-gray-500">
-              {autoAssign
-                ? 'No jobs waiting for admin assignment.'
-                : 'Auto-assign is OFF. Jobs will appear here after an admin assigns them.'}
+              {autoAssign ? 'No jobs waiting for assignment.' : 'Auto-assign is OFF.'}
             </p>
           ) : (
-            visibleUnassignedJobs.map((job) => (
-              <div key={job.id} className="p-4 text-gray-600 border rounded shadow-sm bg-white">
-                <p className="font-medium text-gray-900">{job.customerName || 'Customer'}</p>
-                <p className="text-sm text-gray-700">{job.displayAddress}</p>
-                <p className="text-sm text-gray-700">{job.date} at {job.displayTime}</p>
-                <p className="text-sm text-gray-700">
-                  {job.bedrooms ?? 0} bed, {job.bathrooms ?? 0} bath, {job.livingRooms ?? 0} living, {job.kitchens ?? 0} kitchen
-                </p>
-                <p className="text-sm text-gray-700">
-                  Add-ons: {Array.isArray(job.addOns) ? job.addOns.join(', ') : (job.addOns || 'None')}
-                </p>
-                {job.totalPrice != null && <p className="text-sm font-semibold text-blue-600">£{job.totalPrice}</p>}
-                <button onClick={() => assignToMe(job.id)} className="mt-2 bg-[#0071bc] text-white px-3 py-1 rounded hover:opacity-95 cursor-pointer">
-                  Assign to me
-                </button>
-              </div>
-            ))
+            visibleUnassignedJobs.map((job) => {
+              const teamNote = twoCleanerLine(job) || (job.twoCleaners ? 'Team job — needs 2 cleaners' : null);
+              return (
+                <article
+                  key={job.id}
+                  className="bg-white border rounded-lg shadow-sm p-4 md:p-5"
+                >
+                  <div className="md:flex md:items-start md:justify-between md:gap-6">
+                    {/* LEFT content (flex-1 keeps width as content grows) */}
+                    <div className="flex-1 space-y-3">
+                      <div>
+                        <h3 className="text-base font-semibold text-gray-900">{job.customerName || 'Customer'}</h3>
+                        <div className="text-sm text-gray-600 mt-1">{job.displayAddress}</div>
+                        {job.customerPhone && (
+                          <div className="text-sm text-gray-700 mt-1">{job.customerPhone}</div>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
+                        <span className="inline-flex items-center gap-2 px-2 py-1 rounded border border-gray-200">
+                          <strong className="text-gray-800">{formatUKDate(job.date)}</strong>
+                          <span>•</span>
+                          <span>{job.displayTime}</span>
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
+                        <span className="inline-flex items-center gap-2 px-2 py-1 rounded border border-gray-200">
+                          <span>{job.bedrooms ?? 0} bed</span>
+                          <span>·</span>
+                          <span>{job.bathrooms ?? 0} bath</span>
+                          <span>·</span>
+                          <span>{job.livingRooms ?? 0} living</span>
+                          <span>·</span>
+                          <span>{job.kitchens ?? 0} kitchen</span>
+                        </span>
+                      </div>
+
+                      {teamNote && (
+                        <div className="text-xs text-amber-700 bg-amber-50 inline-block px-2 py-1 rounded border border-amber-200">
+                          {teamNote}
+                        </div>
+                      )}
+
+                      <div className="text-sm font-semibold text-blue-700">
+                        {payText(job)}
+                      </div>
+                    </div>
+
+                    {/* RIGHT actions (auto width, small balanced gap) */}
+                    <div className="mt-3 md:mt-0 flex-shrink-0 flex flex-col items-end gap-2 min-w-[180px]">
+                      {/* mini tags above buttons, right-aligned */}
+                      <div className="flex items-center gap-2">
+                        {job.twoCleaners && <Tag>2 cleaners</Tag>}
+                        <Tag>{hoursTag(job)}</Tag>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => assignToMe(job.id)}
+                          className="bg-[#0071bc] text-white px-3 py-2 rounded-md hover:opacity-95 text-sm"
+                        >
+                          Assign to me
+                        </button>
+                        <button
+                          onClick={() => setViewJob(job)}
+                          className="rounded-md border px-3 py-2 text-gray-800 hover:bg-gray-50 text-sm"
+                        >
+                          View
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              );
+            })
           )}
         </div>
       </section>
@@ -573,20 +1228,160 @@ export default function Jobs() {
           {myJobs.length === 0 ? (
             <p className="text-gray-500">You have no assigned jobs.</p>
           ) : (
-            myJobs.map((job) => (
-              <div key={job.id} className="p-4 border rounded shadow-sm bg-green-50">
-                <p className="font-medium text-gray-900">{job.customerName || 'Customer'}</p>
-                <p className="text-sm text-gray-700">{job.displayAddress}</p>
-                <p className="text-sm text-gray-700">{job.date} at {job.displayTime}</p>
-                {job.totalPrice != null && <p className="text-sm font-semibold text-green-700">£{job.totalPrice}</p>}
-                <button onClick={() => removeFromMe(job.id)} className="mt-2 bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600 cursor-pointer">
-                  Remove
-                </button>
-              </div>
-            ))
+            myJobs.map((job) => {
+              const teamNote = twoCleanerLine(job);
+              return (
+                <article
+                  key={job.id}
+                  className="bg-white rounded-2xl shadow p-4 md:p-5 border border-gray-100"
+                  style={{ borderLeftWidth: 6, borderLeftColor: '#16a34a' }}
+                >
+                  <div className="md:flex md:items-start md:justify-between md:gap-6">
+                    {/* LEFT content */}
+                    <div className="flex-1 space-y-3">
+                      <div>
+                        <h3 className="text-base font-semibold text-gray-900">{job.customerName || 'Customer'}</h3>
+                        <div className="text-sm text-gray-600 mt-1">{job.displayAddress}</div>
+                        {job.customerPhone && (
+                          <div className="text-sm text-gray-700 mt-1">{job.customerPhone}</div>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
+                        <span className="inline-flex items-center gap-2 px-2 py-1 rounded border border-gray-200">
+                          <strong className="text-gray-800">{formatUKDate(job.date)}</strong>
+                          <span>•</span>
+                          <span>{job.displayTime}</span>
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
+                        <span className="inline-flex items-center gap-2 px-2 py-1 rounded border border-gray-200">
+                          <span>{job.bedrooms ?? 0} bed</span>
+                          <span>·</span>
+                          <span>{job.bathrooms ?? 0} bath</span>
+                          <span>·</span>
+                          <span>{job.livingRooms ?? 0} living</span>
+                          <span>·</span>
+                          <span>{job.kitchens ?? 0} kitchen</span>
+                        </span>
+                      </div>
+
+                      {teamNote && (
+                        <div className="text-xs text-amber-700 bg-amber-50 inline-block px-2 py-1 rounded border border-amber-200">
+                          {teamNote}
+                        </div>
+                      )}
+
+                      <div className="text-sm font-semibold text-blue-700">
+                        {payText(job)}
+                      </div>
+                    </div>
+
+                    {/* RIGHT actions */}
+                    <div className="mt-3 md:mt-0 flex-shrink-0 flex flex-col items-end gap-2 min-w-[180px]">
+                      {/* mini tags above buttons */}
+                      <div className="flex items-center gap-2">
+                        {job.twoCleaners && <Tag>2 cleaners</Tag>}
+                        <Tag>{hoursTag(job)}</Tag>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => downloadChecklist(job)}
+                          className="bg-[#0071bc] text-white px-3 py-2 rounded-md hover:opacity-95 text-sm"
+                        >
+                          Checklist
+                        </button>
+                        <button
+                          onClick={() => setViewJob(job)}
+                          className="rounded-md border px-3 py-2 text-gray-800 hover:bg-gray-50 text-sm"
+                        >
+                          View
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              );
+            })
           )}
         </div>
       </section>
+
+      {/* VIEW JOB MODAL (unchanged except data shown) */}
+      {viewJob && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+          <div className="w-full max-w-2xl rounded-xl bg-white p-4 shadow-xl overflow-auto max-h-[85vh]">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-lg font-semibold text-gray-900">
+                {viewJob.customerName || 'Customer'}
+              </div>
+              <button
+                className="cursor-pointer rounded-md px-2 py-1 text-sm text-gray-700 hover:bg-gray-100"
+                onClick={() => setViewJob(null)}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-800">
+              <div>
+                <div className="text-sm text-gray-600">Contact</div>
+                <div className="text-sm text-gray-900">{viewJob.customerPhone || '—'}</div>
+
+                <div className="text-sm text-gray-600 mt-3">Address</div>
+                <div className="text-sm text-gray-900">
+                  {typeof viewJob.address === 'string'
+                    ? viewJob.address
+                    : [viewJob.address?.line1, viewJob.address?.line2, viewJob.address?.town, viewJob.address?.county, viewJob.address?.postcode].filter(Boolean).join(', ')}
+                </div>
+
+                <div className="text-sm text-gray-600 mt-3">Add-ons</div>
+                <div className="text-sm text-gray-900">
+                  {Array.isArray(viewJob.addOns) ? viewJob.addOns.join(', ') : (viewJob.addOns ?? 'None')}
+                </div>
+
+                <div className="text-sm text-gray-600 mt-3">Notes / Additional Rooms</div>
+                <div className="text-sm text-gray-900">
+                  {Array.isArray(viewJob.additionalRooms) ? viewJob.additionalRooms.join(', ') : (viewJob.additionalRooms ?? '—')}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-sm text-gray-600">Date & Time</div>
+                <div className="text-sm text-gray-900">{formatUKDate(viewJob.date)} • {viewJob.displayTime || viewJob.startTime || '—'}</div>
+
+                <div className="text-sm text-gray-600 mt-3">Service</div>
+                <div className="text-sm text-gray-900">{viewJob.serviceType || 'Cleaning Service'}</div>
+
+                <div className="text-sm text-gray-600 mt-3">Team</div>
+                <div className="text-sm text-gray-900">
+                  {viewJob.twoCleaners ? (twoCleanerLine(viewJob) ?? 'Two-cleaner job') : 'Single cleaner'}
+                </div>
+
+                <div className="text-sm text-gray-600 mt-3">Your Pay</div>
+                <div className="text-sm text-gray-900">
+                  {(() => {
+                    const h = Number(viewJob.estimatedHours ?? 0) || 0;
+                    return h ? `${currency.format(h * staffRate)}` : '—';
+                  })()}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 text-right">
+              <button
+                onClick={() => setViewJob(null)}
+                className="rounded-md bg-[#0071bc] text-white px-3 py-2 hover:opacity-95"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

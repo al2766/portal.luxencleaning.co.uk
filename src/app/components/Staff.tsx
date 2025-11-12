@@ -14,6 +14,17 @@ type StaffMember = {
   active?: boolean;
   availability?: Record<string, any>;
   role?: string;
+  hasCar?: boolean;
+  bringsSupplies?: boolean;
+  equipment?: string[];
+  pets?: string[] | string;
+  services?: string[];
+  teamJobs?: boolean;
+  rightToWorkUk?: boolean;
+  dateOfBirth?: string | null;
+  notes?: string;
+  minNoticeHours?: number;
+  travelBufferMins?: number;
   [k: string]: any;
 };
 
@@ -82,15 +93,12 @@ export default function Staff() {
       const idx = (todayIndex + i) % 7;
       names.push(canonical[idx]);
     }
-    // convert to monday-first style keys if needed by availability shape in db (we assume keys like 'monday'..'sunday')
-    // canonical already uses monday.. etc, but starting array uses sunday-first; above canonical array matches JS getDay indexing
     return names;
   }
 
   // read availability for a specific day key (handles multiple shapes)
   function availabilityForDayKey(s: StaffMember, key: string) {
     const av = s.availability || {};
-    // try lowercase key (expected), capitalized, or first-letter uppercase, or numeric index
     const candidates = [
       key,
       key.charAt(0).toUpperCase() + key.slice(1),
@@ -104,14 +112,12 @@ export default function Staff() {
         break;
       }
     }
-    // also allow numeric index access if availability stored as array in Mon..Sun order:
     if (v === undefined && Array.isArray(av)) {
       const canonicalOrder = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
       const idx = canonicalOrder.indexOf(key.toLowerCase());
       if (idx >= 0 && av[idx] !== undefined) v = av[idx];
     }
 
-    // Normalize result to { available: boolean, start?: string, end?: string }
     if (typeof v === 'boolean') {
       return { available: v };
     }
@@ -119,13 +125,11 @@ export default function Staff() {
       return { available: false };
     }
     if (typeof v === 'object') {
-      // possible fields: available, start, end, from, to, startTime, endTime
-      const available = v.available ?? v.isAvailable ?? true; // object present implies available unless explicit false
+      const available = v.available ?? v.isAvailable ?? true;
       const start = v.start ?? v.from ?? v.startTime ?? v.open ?? null;
       const end = v.end ?? v.to ?? v.endTime ?? v.close ?? null;
       return { available: Boolean(available), start: start ?? undefined, end: end ?? undefined };
     }
-    // fallback: false
     return { available: false };
   }
 
@@ -136,6 +140,18 @@ export default function Staff() {
       const v = availabilityForDayKey(s, k);
       return Boolean(v.available);
     });
+  }
+
+  // small helper: pretty date (YYYY-MM-DD -> dd MMM yyyy) fallback
+  function prettyDateISO(iso?: string | null) {
+    if (!iso) return '—';
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return String(iso);
+      return d.toLocaleDateString(undefined, { day: '2-digit', month: 'long', year: 'numeric' });
+    } catch {
+      return String(iso);
+    }
   }
 
   return (
@@ -174,10 +190,9 @@ export default function Staff() {
                     <td className="px-4 py-2">
                       <div className="flex gap-1 items-center">
                         {week.map((ok, idx) => {
-                          // title should indicate the real day name for tooltip: compute day names starting from today
                           const days = getNext7DaysFromToday();
                           const d = days[idx];
-                          const dayShort = d.toLocaleDateString(undefined, { weekday: 'short' }); // Mon, Tue...
+                          const dayShort = d.toLocaleDateString(undefined, { weekday: 'short' });
                           const dayFull = d.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'short' });
                           return (
                             <span
@@ -205,97 +220,168 @@ export default function Staff() {
         </table>
       </div>
 
-      {/* View more modal */}
+     {/* View more modal - UPDATED */}
       {viewMember && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
-          <div className="w-full max-w-2xl rounded-xl bg-white p-4 shadow-xl overflow-auto max-h-[85vh]">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="text-lg font-semibold text-gray-900">
-                {viewMember.name || 'Staff member'}
+          <div className="w-full max-w-2xl rounded-xl bg-white p-5 shadow-xl overflow-auto max-h-[85vh]">
+            {/* Header */}
+            <div className="mb-4 flex items-start justify-between gap-4">
+              <div>
+                <div className="text-2xl font-bold text-gray-900">{viewMember.name || 'Staff member'}</div>
+                <div className="text-sm text-gray-600 mt-1">{viewMember.email || viewMember.phone || '—'}</div>
               </div>
-              <button
-                className="cursor-pointer rounded-md px-2 py-1 text-sm text-gray-700 hover:bg-gray-100"
-                onClick={() => setViewMember(null)}
-              >
-                Close
-              </button>
+              <div className="text-right">
+                <div className="text-sm text-gray-600">Role</div>
+                <div className="font-medium text-gray-900">{viewMember.role || 'Cleaner'}</div>
+                <div className="mt-3">
+                  <button
+                    className="cursor-pointer rounded-md px-3 py-2 text-sm bg-[#0071bc] text-white hover:opacity-95"
+                    onClick={() => setViewMember(null)}
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <div className="text-sm text-gray-600 mb-1">Contact</div>
-                <div className="text-sm text-gray-900">{viewMember.phone || viewMember.email || '—'}</div>
-                <div className="text-sm text-gray-600 mt-3">Postcode</div>
-                <div className="text-sm text-gray-900">{viewMember.homePostcode || '—'}</div>
-                <div className="text-sm text-gray-600 mt-3">Radius</div>
-                <div className="text-sm text-gray-900">{viewMember.radiusMiles ?? '—'} miles</div>
+            {/* Contact Info */}
+            <div className="rounded-xl border bg-white p-4 shadow-sm mb-4">
+              <h3 className="text-base font-semibold text-gray-900 mb-3">Contact Information</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <div className="text-xs text-gray-600 mb-0.5">Phone</div>
+                  <div className="text-sm text-gray-900">{viewMember.phone || '—'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-600 mb-0.5">Email</div>
+                  <div className="text-sm text-gray-900">{viewMember.email || '—'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-600 mb-0.5">Postcode</div>
+                  <div className="text-sm text-gray-900">{viewMember.homePostcode || '—'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-600 mb-0.5">Travel Radius</div>
+                  <div className="text-sm text-gray-900">{viewMember.radiusMiles ?? '—'} miles</div>
+                </div>
               </div>
+              {viewMember.notes && (
+                <div className="mt-3">
+                  <div className="text-xs text-gray-600 mb-0.5">Notes</div>
+                  <div className="text-sm text-gray-900">{viewMember.notes}</div>
+                </div>
+              )}
+            </div>
 
+            {/* Operational Settings */}
+            <div className="rounded-xl border bg-white p-4 shadow-sm mb-4">
+              <h3 className="text-base font-semibold text-gray-900 mb-3">Operational Settings</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div>
+                  <div className="text-xs text-gray-600 mb-0.5">Min Notice</div>
+                  <div className="text-sm text-gray-900">{(viewMember.minNoticeHours ?? '—') !== '—' ? `${viewMember.minNoticeHours} h` : '—'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-600 mb-0.5">Travel Buffer</div>
+                  <div className="text-sm text-gray-900">{(viewMember.travelBufferMins ?? '—') !== '—' ? `${viewMember.travelBufferMins} min` : '—'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-600 mb-0.5">Date of Birth</div>
+                  <div className="text-sm text-gray-900">{prettyDateISO(viewMember.dateOfBirth ?? undefined)}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-600 mb-0.5">Status</div>
+                  <div className="text-sm text-gray-900">{viewMember.active === false ? 'Inactive' : 'Active'}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Transport & Equipment */}
+            <div className="rounded-xl border bg-white p-4 shadow-sm mb-4">
+              <h3 className="text-base font-semibold text-gray-900 mb-3">Transport & Equipment</h3>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3">
+                <div>
+                  <div className="text-xs text-gray-600 mb-0.5">Has Car</div>
+                  <div className="text-sm text-gray-900">{viewMember.hasCar === true ? 'Yes' : viewMember.hasCar === false ? 'No' : '—'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-600 mb-0.5">Brings Supplies</div>
+                  <div className="text-sm text-gray-900">{viewMember.bringsSupplies === true ? 'Yes' : viewMember.bringsSupplies === false ? 'No' : '—'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-600 mb-0.5">Team Jobs</div>
+                  <div className="text-sm text-gray-900">{viewMember.teamJobs === true ? 'Yes' : viewMember.teamJobs === false ? 'No' : '—'}</div>
+                </div>
+              </div>
               <div>
-                <div className="text-sm text-gray-600 mb-1">Role / Status</div>
-                <div className="text-sm text-gray-900">{viewMember.role || 'cleaner'}</div>
-                <div className="text-sm text-gray-600 mt-3">Right to work</div>
+                <div className="text-xs text-gray-600 mb-0.5">Equipment</div>
+                <div className="text-sm text-gray-900">
+                  {Array.isArray(viewMember.equipment) && viewMember.equipment.length > 0 
+                    ? viewMember.equipment.join(', ') 
+                    : '—'}
+                </div>
+              </div>
+            </div>
+
+            {/* Services & Preferences */}
+            <div className="rounded-xl border bg-white p-4 shadow-sm mb-4">
+              <h3 className="text-base font-semibold text-gray-900 mb-3">Services & Preferences</h3>
+              <div className="space-y-3">
+                <div>
+                  <div className="text-xs text-gray-600 mb-0.5">Pet Allergies</div>
+                  <div className="text-sm text-gray-900">
+                    {Array.isArray(viewMember.pets) && viewMember.pets.length > 0
+                      ? `Allergic to: ${viewMember.pets.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')}`
+                      : 'No allergies'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-600 mb-0.5">Services Offered</div>
+                  <div className="text-sm text-gray-900">
+                    {Array.isArray(viewMember.services) && viewMember.services.length > 0
+                      ? viewMember.services.join(', ')
+                      : '—'}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Legal */}
+            <div className="rounded-xl border bg-white p-4 shadow-sm mb-4">
+              <h3 className="text-base font-semibold text-gray-900 mb-3">Legal</h3>
+              <div>
+                <div className="text-xs text-gray-600 mb-0.5">Right to Work in UK</div>
                 <div className="text-sm text-gray-900">{viewMember.rightToWorkUk ? 'Yes' : 'No'}</div>
-                <div className="text-sm text-gray-600 mt-3">DOB</div>
-                <div className="text-sm text-gray-900">{viewMember.dateOfBirth || '—'}</div>
               </div>
+            </div>
 
-              <div className="md:col-span-2">
-                <div className="text-sm text-gray-600 mb-2">Weekly availability</div>
-
-                {/* NEW: show canonical Monday -> Sunday in a column with tick and start/end times if present */}
-                <div className="divide-y">
-                  {canonicalWeekdayNames().map((dayKey) => {
-                    const displayLabel = dayKey.charAt(0).toUpperCase() + dayKey.slice(1); // Monday
-                    const av = availabilityForDayKey(viewMember, dayKey);
-                    return (
-                      <div key={dayKey} className="py-2 flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <div className={`inline-block w-3 h-3 rounded-full ${av.available ? 'bg-green-600' : 'bg-red-400'}`} />
-                          <div className="text-sm text-gray-900">{displayLabel}</div>
-                        </div>
-                        <div className="text-sm text-gray-700">
-                          {av.available ? (
-                            av.start || av.end ? (
-                              // show start - end if either exists, fallback to only start or only end if one missing
-                              <>
-                                {av.start ? av.start : '—'}{av.start || av.end ? ' — ' : ''}{av.end ? av.end : ''}
-                              </>
-                            ) : (
-                              'Available'
-                            )
-                          ) : (
-                            'Not available'
-                          )}
+            {/* Availability */}
+            <div className="rounded-xl border bg-white p-4 shadow-sm mb-4">
+              <h3 className="text-base font-semibold text-gray-900 mb-3">Weekly Availability</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {canonicalWeekdayNames().map((dayKey) => {
+                  const label = dayKey.charAt(0).toUpperCase() + dayKey.slice(1);
+                  const av = availabilityForDayKey(viewMember, dayKey);
+                  return (
+                    <div key={dayKey} className="flex items-start gap-2 p-2">
+                      <div className={`inline-block w-3 h-3 mt-1 rounded-full flex-shrink-0 ${av.available ? 'bg-green-600' : 'bg-red-400'}`} />
+                      <div>
+                        <div className="text-sm font-medium text-gray-900">{label}</div>
+                        <div className="text-xs text-gray-600">
+                          {av.available ? (av.start || av.end ? `${av.start ?? '—'} — ${av.end ?? '—'}` : 'Available') : 'Not available'}
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="md:col-span-2">
-                <div className="text-sm text-gray-600 mb-1">Equipment</div>
-                <div className="text-sm text-gray-900">
-                  {Array.isArray(viewMember.equipment) ? viewMember.equipment.join(', ') : (viewMember.equipment || '—')}
-                </div>
-
-                <div className="text-sm text-gray-600 mt-3 mb-1">Services</div>
-                <div className="text-sm text-gray-900">
-                  {Array.isArray(viewMember.services) ? viewMember.services.join(', ') : (viewMember.services || '—')}
-                </div>
-
-                <div className="text-sm text-gray-600 mt-3 mb-1">Notes</div>
-                <div className="text-sm text-gray-900">
-                  {viewMember.notes || '—'}
-                </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
-            <div className="mt-4 text-right">
+            {/* Footer actions */}
+            <div className="mt-5 flex justify-end gap-2">
               <button
                 onClick={() => setViewMember(null)}
-                className="rounded-md bg-[#0071bc] text-white px-3 py-2 hover:opacity-95"
+                className="rounded-md border px-3 py-2 text-sm hover:bg-gray-50"
               >
                 Close
               </button>

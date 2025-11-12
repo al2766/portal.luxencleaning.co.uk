@@ -1,8 +1,25 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { auth, db } from '@/lib/firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
+
+import dynamic from 'next/dynamic';
+import 'leaflet/dist/leaflet.css';
+import type { MapContainerProps, TileLayerProps, CircleProps } from 'react-leaflet';
+
+const MapContainer = dynamic<MapContainerProps>(
+  () => import('react-leaflet').then(m => m.MapContainer),
+  { ssr: false }
+);
+const TileLayer = dynamic<TileLayerProps>(
+  () => import('react-leaflet').then(m => m.TileLayer),
+  { ssr: false }
+);
+const Circle = dynamic<CircleProps>(
+  () => import('react-leaflet').then(m => m.Circle),
+  { ssr: false }
+);
 
 type DayName = 'Monday'|'Tuesday'|'Wednesday'|'Thursday'|'Friday'|'Saturday'|'Sunday';
 type DayAvail = { available: boolean; from: string; to: string };
@@ -19,17 +36,15 @@ type ProfileData = {
   travelBufferMins?: number | null;
   availability: Record<DayName, DayAvail>;
 
-  // new fields to show (all start undefined/false/empty)
-  hasCar?: boolean;
-  bringsSupplies?: boolean;
-  equipment?: string[];            // keys from Jobs.tsx
-  pets?: 'dogs'|'cats'|'none' | ''; // allow empty = none selected
+  hasCar?: boolean | null;
+  bringsSupplies?: boolean | null;
+  equipment?: string[];
+  pets?: string[]; // Changed to array for multi-select
   services?: string[];
-  teamJobs?: boolean;
+  teamJobs?: boolean | null;
   rightToWorkUk?: boolean;
 };
 
-// Blank availability (nothing pre-ticked, no times)
 const blankAvailability: Record<DayName, DayAvail> = {
   Monday:    { available: false, from: '', to: '' },
   Tuesday:   { available: false, from: '', to: '' },
@@ -41,25 +56,14 @@ const blankAvailability: Record<DayName, DayAvail> = {
 };
 
 function normalizeAvailability(raw: any): Record<DayName, DayAvail> {
-  // Start from blank; only fill what exists
   const out: Record<DayName, DayAvail> = { ...blankAvailability };
   if (!raw || typeof raw !== 'object') return out;
 
   const map: Record<string, DayName> = {
-    monday: 'Monday',
-    tuesday: 'Tuesday',
-    wednesday: 'Wednesday',
-    thursday: 'Thursday',
-    friday: 'Friday',
-    saturday: 'Saturday',
-    sunday: 'Sunday',
-    Monday: 'Monday',
-    Tuesday: 'Tuesday',
-    Wednesday: 'Wednesday',
-    Thursday: 'Thursday',
-    Friday: 'Friday',
-    Saturday: 'Saturday',
-    Sunday: 'Sunday',
+    monday: 'Monday', tuesday: 'Tuesday', wednesday: 'Wednesday', thursday: 'Thursday',
+    friday: 'Friday', saturday: 'Saturday', sunday: 'Sunday',
+    Monday: 'Monday', Tuesday: 'Tuesday', Wednesday: 'Wednesday', Thursday: 'Thursday',
+    Friday: 'Friday', Saturday: 'Saturday', Sunday: 'Sunday',
   };
 
   for (const k of Object.keys(raw)) {
@@ -77,6 +81,31 @@ function normalizeAvailability(raw: any): Record<DayName, DayAvail> {
   return out;
 }
 
+function isPostcodeUKish(v: string) {
+  return /^[A-Za-z]{1,2}\d[A-Za-z\d]?\s?\d[A-Za-z]{2}$/.test((v || '').trim());
+}
+
+function milesToMeters(mi: number) { return mi * 1609.34; }
+
+function circleBoundsFromMiles(center: [number, number], miles: number) {
+  const [lat, lon] = center;
+  const meters = miles * 1609.34;
+  const dLat = meters / 111_320;
+  const dLon = meters / (111_320 * Math.cos((lat * Math.PI) / 180) || 1);
+  const south = lat - dLat;
+  const north = lat + dLat;
+  const west = lon - dLon;
+  const east = lon + dLon;
+  return [
+    [south, west],
+    [north, east],
+  ] as [[number, number], [number, number]];
+}
+
+type LeafletMapLike = {
+  fitBounds?: (bounds: [[number, number], [number, number]], options?: any) => void;
+};
+
 export default function Profile() {
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState<ProfileData>({
@@ -85,19 +114,25 @@ export default function Profile() {
     phone: '',
     dateOfBirth: '',
     homePostcode: '',
-    radiusMiles: null,          // ← start blank
-    minNoticeHours: null,       // ← start blank
-    travelBufferMins: null,     // ← start blank
+    radiusMiles: null,
+    minNoticeHours: null,
+    travelBufferMins: null,
     availability: blankAvailability,
-
-    hasCar: false,
-    bringsSupplies: false,
+    hasCar: null,
+    bringsSupplies: null,
     equipment: [],
-    pets: '',                   // ← none selected
+    pets: [],
     services: [],
-    teamJobs: false,
+    teamJobs: null,
     rightToWorkUk: false,
   });
+
+  // Modal for setting radius with map
+  const [radiusOpen, setRadiusOpen] = useState(false);
+  const [tempMiles, setTempMiles] = useState<number>(10);
+  const [mapCenter, setMapCenter] = useState<[number, number] | null>(null);
+  const [geoLoading, setGeoLoading] = useState(false);
+  const mapRef = useRef<LeafletMapLike | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -115,7 +150,6 @@ export default function Profile() {
 
       const availability = normalizeAvailability(staff.availability || {});
 
-      // If no stored value, keep it blank (null). No hidden defaults.
       const radiusMiles =
         typeof staff.radiusMiles === 'number'
           ? staff.radiusMiles
@@ -139,6 +173,11 @@ export default function Profile() {
           ? null
           : Number(staff.travelBufferMins);
 
+      const hasCar = typeof staff.hasCar === 'boolean' ? staff.hasCar : null;
+      const bringsSupplies = typeof staff.bringsSupplies === 'boolean' ? staff.bringsSupplies : null;
+      const teamJobs = typeof staff.teamJobs === 'boolean' ? staff.teamJobs : null;
+      const pets = Array.isArray(staff.pets) ? staff.pets : [];
+
       setForm({
         name: (user.name || staff.name || '').trim(),
         email: user.email || staff.email || auth.currentUser?.email || '',
@@ -149,16 +188,12 @@ export default function Profile() {
         minNoticeHours,
         travelBufferMins,
         availability,
-
-        hasCar: !!staff.hasCar,
-        bringsSupplies: !!staff.bringsSupplies,
+        hasCar,
+        bringsSupplies,
         equipment: Array.isArray(staff.equipment) ? staff.equipment : [],
-        pets:
-          staff.pets === 'dogs' || staff.pets === 'cats' || staff.pets === 'none'
-            ? staff.pets
-            : '',
+        pets,
         services: Array.isArray(staff.services) ? staff.services : [],
-        teamJobs: !!staff.teamJobs,
+        teamJobs,
         rightToWorkUk: !!staff.rightToWorkUk,
       });
 
@@ -167,44 +202,81 @@ export default function Profile() {
     load();
   }, []);
 
+  // Open modal and prepare state
+  const openRadiusModal = async () => {
+    setTempMiles(form.radiusMiles ?? 10);
+    if (isPostcodeUKish(form.homePostcode || '')) {
+      try {
+        setGeoLoading(true);
+        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(form.homePostcode!)}&countrycodes=gb&limit=1`;
+        const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+        const json = await res.json();
+        if (Array.isArray(json) && json.length > 0) {
+          const { lat, lon } = json[0];
+          setMapCenter([parseFloat(lat), parseFloat(lon)]);
+        } else {
+          setMapCenter(null);
+        }
+      } catch {
+        setMapCenter(null);
+      } finally {
+        setGeoLoading(false);
+      }
+    } else {
+      setMapCenter(null);
+    }
+    setRadiusOpen(true);
+  };
+
+  // Smooth fit when mapCenter or tempMiles change
+  useEffect(() => {
+    if (!mapRef.current || !mapRef.current.fitBounds || !mapCenter) return;
+    const bounds = circleBoundsFromMiles(mapCenter, tempMiles || 1);
+    // @ts-ignore leaflet options typing
+    mapRef.current.fitBounds(bounds, { padding: [24, 24], animate: true, duration: 0.8 });
+  }, [mapCenter, tempMiles, radiusOpen]);
+
   function setField<K extends keyof ProfileData>(key: K, value: ProfileData[K]) {
     setForm(prev => ({ ...prev, [key]: value }));
   }
 
- function setDay(day: DayName, field: keyof DayAvail, value: DayAvail[typeof field]) {
-  setForm(prev => {
-    const cur = prev.availability[day];
-    if (field === 'available') {
-      const makeOn = Boolean(value);
+  function setDay(day: DayName, field: keyof DayAvail, value: DayAvail[typeof field]) {
+    setForm(prev => {
+      const cur = prev.availability[day];
+      if (field === 'available') {
+        const makeOn = Boolean(value);
+        return {
+          ...prev,
+          availability: {
+            ...prev.availability,
+            [day]: {
+              available: makeOn,
+              from: makeOn ? (cur.from || '07:00') : '',
+              to:   makeOn ? (cur.to   || '20:00') : '',
+            },
+          },
+        };
+      }
       return {
         ...prev,
         availability: {
           ...prev.availability,
-          [day]: {
-            available: makeOn,
-            from: makeOn ? (cur.from || '07:00') : '',
-            to:   makeOn ? (cur.to   || '20:00') : '',
-          },
+          [day]: { ...cur, [field]: value },
         },
       };
-    }
-    return {
-      ...prev,
-      availability: {
-        ...prev.availability,
-        [day]: { ...cur, [field]: value },
-      },
-    };
-  });
-}
+    });
+  }
 
-
-  // Helper to coerce blank -> null, numeric -> number
   function toNullableNumber(v: unknown): number | null {
     if (v === '' || v === null || v === undefined) return null;
     const n = Number(v);
     return Number.isFinite(n) ? n : null;
   }
+
+  const toggleIn = (list: string[], value: string) => {
+    const newList = list.includes(value) ? list.filter(v => v !== value) : [...list, value];
+    return newList;
+  };
 
   const save = async () => {
     const uid = auth.currentUser?.uid;
@@ -218,23 +290,17 @@ export default function Profile() {
         name: form.name,
         dateOfBirth: form.dateOfBirth || null,
         homePostcode: (form.homePostcode || '').toUpperCase().trim(),
-
-        // Do NOT inject defaults; keep null if blank
         radiusMiles: toNullableNumber(form.radiusMiles as number | string | null),
         minNoticeHours: toNullableNumber(form.minNoticeHours as number | string | null),
         travelBufferMins: toNullableNumber(form.travelBufferMins as number | string | null),
-
         availability: form.availability,
-
-        // new fields
-        hasCar: !!form.hasCar,
-        bringsSupplies: !!form.bringsSupplies,
+        hasCar: form.hasCar === true,
+        bringsSupplies: form.bringsSupplies === true,
         equipment: Array.isArray(form.equipment) ? form.equipment : [],
-        pets: form.pets || '', // empty string = none selected
+        pets: Array.isArray(form.pets) ? form.pets : [],
         services: Array.isArray(form.services) ? form.services : [],
-        teamJobs: !!form.teamJobs,
+        teamJobs: form.teamJobs === true,
         rightToWorkUk: !!form.rightToWorkUk,
-
         updatedAt: new Date().toISOString(),
       },
       { merge: true }
@@ -281,7 +347,6 @@ export default function Profile() {
           </div>
           <div>
             <label className="block text-base font-semibold text-gray-900 mb-0.5">Date of Birth</label>
-            <p className="text-xs text-gray-600 mb-1">(Optional)</p>
             <input className={input} type="date" placeholder="DOB" value={form.dateOfBirth || ''} onChange={e=>setField('dateOfBirth', e.target.value)} />
           </div>
         </div>
@@ -294,24 +359,24 @@ export default function Profile() {
           <div>
             <label className="block text-base font-semibold text-gray-900 mb-0.5">Postcode</label>
             <p className="text-xs text-gray-600 mb-1">(Used to match you with nearby jobs)</p>
-            <input name='name' className={input} placeholder="e.g., M1 2AB" value={form.homePostcode || ''} onChange={e=>setField('homePostcode', e.target.value)} />
+            <input className={input} placeholder="e.g., M1 2AB" value={form.homePostcode || ''} onChange={e=>setField('homePostcode', e.target.value)} />
           </div>
           <div>
             <label className="block text-base font-semibold text-gray-900 mb-0.5">Travel distance</label>
-            <p className="text-xs text-gray-600 mb-1">(Approximate max distance from your home postcode, in miles)</p>
-            <input
-              className={input}
-              type="number"
-              min={1}
-              max={50}
-              placeholder="Radius (miles)"
-              value={form.radiusMiles ?? ''}
-              onChange={e=>setField('radiusMiles', e.target.value === '' ? null : Number(e.target.value))}
-            />
+            <p className="text-xs text-gray-600 mb-1">(Miles from home)</p>
+
+            {/* REPLACED INPUT WITH BUTTON THAT OPENS MODAL */}
+            <button
+              type="button"
+              onClick={openRadiusModal}
+              className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-800 hover:bg-gray-50"
+            >
+              {form.radiusMiles ? `${form.radiusMiles} mile${form.radiusMiles === 1 ? '' : 's'}` : 'Set travel radius'}
+            </button>
           </div>
           <div>
-            <label className="block text-base font-semibold text-gray-900 mb-0.5">Notice time before jobs</label>
-            <p className="text-xs text-gray-600 mb-1">(How many hours’ notice you need before a job starts)</p>
+            <label className="block text-base font-semibold text-gray-900 mb-0.5">Notice time</label>
+            <p className="text-xs text-gray-600 mb-1">(Hours before job)</p>
             <input
               className={input}
               type="number"
@@ -323,7 +388,7 @@ export default function Profile() {
           </div>
           <div>
             <label className="block text-base font-semibold text-gray-900 mb-0.5">Time between jobs</label>
-            <p className="text-xs text-gray-600 mb-1">(Minimum gap you need between jobs, in minutes)</p>
+            <p className="text-xs text-gray-600 mb-1">(Gap in minutes)</p>
             <input
               className={input}
               type="number"
@@ -339,17 +404,58 @@ export default function Profile() {
       {/* Transport & Equipment */}
       <div className="rounded-xl border bg-white p-4 md:p-6 shadow-sm">
         <h2 className="text-lg font-semibold text-gray-900 mb-3">Transport & Equipment</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <label className="inline-flex items-center gap-2 text-gray-800">
-            <input type="checkbox" className="h-4 w-4" checked={!!form.hasCar} onChange={e=>setField('hasCar', e.target.checked)} />
-            I have a car
-          </label>
-          <label className="inline-flex items-center gap-2 text-gray-800">
-            <input type="checkbox" className="h-4 w-4" checked={!!form.bringsSupplies} onChange={e=>setField('bringsSupplies', e.target.checked)} />
-            I bring my own supplies
-          </label>
+        
+        {/* Has Car - Yes/No */}
+        <div className="mb-3">
+          <label className="block text-base font-semibold text-gray-900 mb-1">Do you have a car?</label>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setField('hasCar', false)}
+              className={`px-3 py-1.5 rounded border cursor-pointer ${
+                form.hasCar === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+              }`}
+            >
+              No
+            </button>
+            <button
+              type="button"
+              onClick={() => setField('hasCar', true)}
+              className={`px-3 py-1.5 rounded border cursor-pointer ${
+                form.hasCar === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+              }`}
+            >
+              Yes
+            </button>
+          </div>
         </div>
 
+        {/* Brings Supplies - Yes/No */}
+        <div className="mb-3">
+          <label className="block text-base font-semibold text-gray-900 mb-1">Do you have your own supplies?</label>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setField('bringsSupplies', false)}
+              className={`px-3 py-1.5 rounded border cursor-pointer ${
+                form.bringsSupplies === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+              }`}
+            >
+              No
+            </button>
+            <button
+              type="button"
+              onClick={() => setField('bringsSupplies', true)}
+              className={`px-3 py-1.5 rounded border cursor-pointer ${
+                form.bringsSupplies === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+              }`}
+            >
+              Yes
+            </button>
+          </div>
+        </div>
+
+        {/* Equipment */}
         <div className="mt-3">
           <label className="block text-base font-semibold text-gray-900 mb-0.5">Equipment you can bring</label>
           <p className="text-xs text-gray-600 mb-1">(Select all that apply)</p>
@@ -379,7 +485,7 @@ export default function Profile() {
                       setField('equipment', next);
                     }
                   }}
-                  className={`px-3 py-1.5 rounded border ${selected ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'}`}
+                  className={`px-3 py-1.5 rounded border cursor-pointer ${selected ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'}`}
                 >
                   {label}
                 </button>
@@ -393,24 +499,74 @@ export default function Profile() {
       <div className="rounded-xl border bg-white p-4 md:p-6 shadow-sm">
         <h2 className="text-lg font-semibold text-gray-900 mb-3">Services & Preferences</h2>
 
+        {/* Pet Allergies - Yes/No with multi-select */}
         <div className="mb-3">
-          <label className="block text-base font-semibold text-gray-900 mb-0.5">Comfortable with pets?</label>
-          <p className="text-xs text-gray-600 mb-1">(Choose one or leave unselected)</p>
-          <div className="flex gap-2">
-            {(['dogs','cats','none'] as const).map(k => (
+          <label className="block text-base font-semibold text-gray-900 mb-1">Are you allergic to any animals?</label>
+          <div className="space-y-3">
+            <div className="flex gap-2">
               <button
-                key={k}
                 type="button"
-                onClick={()=>setField('pets', k)}
-                className={`px-3 py-1.5 rounded border ${form.pets === k ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'}`}
+                onClick={() => setField('pets', [])}
+                className={`px-3 py-1.5 rounded border cursor-pointer ${
+                  form.pets?.length === 0 ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                }`}
               >
-                {k === 'dogs' ? 'Dogs' : k === 'cats' ? 'Cats' : 'None'}
+                No
               </button>
-            ))}
+              <button
+                type="button"
+                onClick={() => {
+                  if (form.pets?.length === 0) setField('pets', ['dogs']);
+                }}
+                className={`px-3 py-1.5 rounded border cursor-pointer ${
+                  (form.pets?.length ?? 0) > 0 ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                }`}
+              >
+                Yes
+              </button>
+            </div>
+            
+            {(form.pets?.length ?? 0) > 0 && (
+              <div>
+                <p className="text-sm text-gray-700 mb-2">Select all animals you're allergic to:</p>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    ['dogs','Dogs'],
+                    ['cats','Cats'],
+                    ['birds','Birds'],
+                    ['rabbits','Rabbits'],
+                    ['rodents','Rodents (hamsters, guinea pigs, etc.)'],
+                    ['reptiles','Reptiles'],
+                    ['horses','Horses'],
+                  ].map(([key,label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => {
+                        const curr = Array.isArray(form.pets) ? [...form.pets] : [];
+                        if (curr.includes(key)) {
+                          const remaining = curr.filter(p => p !== key);
+                          setField('pets', remaining.length > 0 ? remaining : [key]);
+                        } else {
+                          setField('pets', [...curr, key]);
+                        }
+                      }}
+                      className={`px-3 py-1.5 rounded border cursor-pointer ${
+                        form.pets?.includes(key) ? 'border-[#0071bc] bg-[#0071bc] text-white' : 'border-gray-300 text-gray-800 hover:border-gray-400'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-600 mt-2">Click to select/deselect. You can choose multiple.</p>
+              </div>
+            )}
           </div>
         </div>
 
-        <div>
+        {/* Services */}
+        <div className="mb-3">
           <label className="block text-base font-semibold text-gray-900 mb-0.5">Service types</label>
           <p className="text-xs text-gray-600 mb-1">(Select all that you can do)</p>
           <div className="flex flex-wrap gap-2">
@@ -434,7 +590,7 @@ export default function Profile() {
                     if (i >= 0) curr.splice(i,1); else curr.push(key);
                     setField('services', curr);
                   }}
-                  className={`px-3 py-1.5 rounded border ${selected ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'}`}
+                  className={`px-3 py-1.5 rounded border cursor-pointer ${selected ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'}`}
                 >
                   {label}
                 </button>
@@ -443,11 +599,29 @@ export default function Profile() {
           </div>
         </div>
 
+        {/* Team Jobs - Yes/No */}
         <div className="mt-3">
-          <label className="inline-flex items-center gap-2 text-gray-800">
-            <input type="checkbox" className="h-4 w-4" checked={!!form.teamJobs} onChange={e=>setField('teamJobs', e.target.checked)} />
-            Okay with team jobs
-          </label>
+          <label className="block text-base font-semibold text-gray-900 mb-1">Okay with team jobs?</label>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setField('teamJobs', false)}
+              className={`px-3 py-1.5 rounded border cursor-pointer ${
+                form.teamJobs === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+              }`}
+            >
+              No
+            </button>
+            <button
+              type="button"
+              onClick={() => setField('teamJobs', true)}
+              className={`px-3 py-1.5 rounded border cursor-pointer ${
+                form.teamJobs === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+              }`}
+            >
+              Yes
+            </button>
+          </div>
         </div>
       </div>
 
@@ -455,7 +629,7 @@ export default function Profile() {
       <div className="rounded-xl border bg-white p-4 md:p-6 shadow-sm">
         <h2 className="text-lg font-semibold text-gray-900 mb-3">Legal</h2>
         <p className="text-sm text-gray-700 mb-2">
-          Confirm you’re legally allowed to work in the UK. You may be asked to provide proof.
+          Confirm you're legally allowed to work in the UK. You may be asked to provide proof.
         </p>
         <label className="inline-flex items-center gap-2 text-gray-800">
           <input type="checkbox" className="h-4 w-4" checked={!!form.rightToWorkUk} onChange={e=>setField('rightToWorkUk', e.target.checked)} />
@@ -463,7 +637,7 @@ export default function Profile() {
         </label>
       </div>
 
-      {/* Availability (kept same layout, starts blank) */}
+      {/* Availability */}
       <div className="rounded-xl border bg-white p-4 md:p-6 shadow-sm">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Weekly Availability</h2>
         <div className="space-y-2">
@@ -508,6 +682,85 @@ export default function Profile() {
           Save
         </button>
       </div>
+
+      {/* Radius modal */}
+      {radiusOpen && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+          <div className="w-full max-w-2xl rounded-xl bg-white p-4 shadow-xl">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-lg font-semibold text-gray-900">Set travel radius</div>
+              <button
+                className="cursor-pointer rounded-md px-2 py-1 text-sm text-gray-700 hover:bg-gray-100"
+                onClick={() => setRadiusOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="text-sm text-gray-700 mb-2">
+              Postcode: <span className="font-medium">{form.homePostcode || '—'}</span>
+            </div>
+
+            <div className="flex items-center gap-3 mb-3">
+              <button
+                type="button"
+                className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-gray-900 text-white text-lg font-bold hover:opacity-90 cursor-pointer"
+                onClick={() => setTempMiles(m => Math.max(1, Math.min(50, Math.round(m - 1))))}
+                aria-label="Decrease miles"
+              >
+                −
+              </button>
+              <div className="text-sm font-semibold text-gray-900 min-w-[90px] text-center">
+                {tempMiles} mile{tempMiles === 1 ? '' : 's'}
+              </div>
+              <button
+                type="button"
+                className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-[#0071bc] text-white text-lg font-bold hover:opacity-95 cursor-pointer"
+                onClick={() => setTempMiles(m => Math.max(1, Math.min(50, Math.round(m + 1))))}
+                aria-label="Increase miles"
+              >
+                +
+              </button>
+            </div>
+
+            <div className="h-64 w-full overflow-hidden rounded-xl border border-gray-200">
+              {!isPostcodeUKish(form.homePostcode || '') ? (
+                <div className="h-full w-full flex items-center justify-center text-sm text-gray-800">
+                  Enter a valid UK postcode first
+                </div>
+              ) : !mapCenter ? (
+                <div className="h-full w-full flex items-center justify-center text-sm text-gray-800">
+                  {geoLoading ? 'Locating postcode…' : 'Unable to locate postcode'}
+                </div>
+              ) : (
+                <MapContainer
+                  center={mapCenter}
+                  zoom={12}
+                  whenCreated={(m) => { mapRef.current = m as unknown as LeafletMapLike; }}
+                  style={{ height: '100%', width: '100%' }}
+                  scrollWheelZoom
+                >
+                  <TileLayer
+                    attribution='&copy; OpenStreetMap contributors &copy; CARTO'
+                    url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+                  />
+                  <Circle center={mapCenter} radius={20} pathOptions={{ color: '#111827', fillColor: '#111827', fillOpacity: 0.9 }} />
+                  <Circle center={mapCenter} radius={milesToMeters(tempMiles)} pathOptions={{ color: '#0ea5e9', fillColor: '#38bdf8', fillOpacity: 0.12 }} />
+                </MapContainer>
+              )}
+            </div>
+
+            <div className="mt-4 text-right">
+              <button
+                onClick={() => { setField('radiusMiles', tempMiles); setRadiusOpen(false); }}
+                className="rounded-md bg-[#0071bc] text-white px-3 py-2 hover:opacity-95"
+              >
+                Save radius
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
