@@ -153,6 +153,10 @@ export default function Jobs() {
   const [services, setServices] = useState<string[]>([]);
   const [rightToWorkUk, setRightToWorkUk] = useState<boolean>(false);
   const [dateOfBirth, setDateOfBirth] = useState<string>('');
+  const [bankAccountName, setBankAccountName] = useState('');
+  const [bankName, setBankName] = useState('');
+  const [bankSortCode, setBankSortCode] = useState('');
+  const [bankAccountNumber, setBankAccountNumber] = useState('');
   const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string>('');
@@ -164,6 +168,8 @@ export default function Jobs() {
   const [autoAssign, setAutoAssign] = useState<boolean>(true);
 
   const [viewJob, setViewJob] = useState<Job | null>(null);
+  const [stepDirection, setStepDirection] = useState<'forward' | 'backward'>('forward');
+  const [confirmedJobs, setConfirmedJobs] = useState<string[]>([]);
 
   useEffect(() => onAuthStateChanged(auth, (u) => setUid(u?.uid ?? null)), []);
 
@@ -270,25 +276,50 @@ export default function Jobs() {
         return dateOfBirth && /^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)
           ? ''
           : 'Please enter your date of birth.';
+      case 13:
+        return bankAccountName.trim() && bankName.trim() && bankSortCode.trim() && bankAccountNumber.trim()
+          ? ''
+          : 'Please enter your bank details.';
       default:
         return '';
     }
-  }, [step, homePostcode, radiusMiles, minNoticeHours, travelBufferMins, availability, hasCar, bringsSupplies, equipment, pets, services, teamJobs, rightToWorkUk, dateOfBirth]);
+  }, [
+    step,
+    homePostcode,
+    radiusMiles,
+    minNoticeHours,
+    travelBufferMins,
+    availability,
+    hasCar,
+    bringsSupplies,
+    equipment,
+    pets,
+    services,
+    teamJobs,
+    rightToWorkUk,
+    dateOfBirth,
+    bankAccountName,
+    bankName,
+    bankSortCode,
+    bankAccountNumber,
+  ]);
 
   const isValid = !stepError;
   const next = () => { 
     setErr(''); 
-    if (!isValid) return; 
+    if (!isValid) return;
+    setStepDirection('forward');
     if (step === 6 && bringsSupplies === false) {
       setEquipment([]);
-      setStep((s) => Math.min(s + 2, 12));
+      setStep((s) => Math.min(s + 2, 13));
     } else {
-      setStep((s) => Math.min(s + 1, 12));
+      setStep((s) => Math.min(s + 1, 13));
     }
   };
 
   const back = () => { 
     setErr(''); 
+    setStepDirection('backward');
     if (step === 8 && bringsSupplies === false) {
       setStep((s) => Math.max(s - 2, 0));
     } else {
@@ -377,6 +408,10 @@ export default function Jobs() {
         teamJobs: teamJobs === true,
         rightToWorkUk,
         dateOfBirth: dateOfBirth || null,
+        bankAccountName: bankAccountName || null,
+        bankName: bankName || null,
+        bankSortCode: bankSortCode || null,
+        bankAccountNumber: bankAccountNumber || null,
         updatedAt: new Date().toISOString(),
       }, { merge: true });
 
@@ -417,9 +452,10 @@ export default function Jobs() {
       ? (e as { message?: string }).message!
       : 'Unexpected error';
 
-  // self-assign supporting 2 cleaners
+  // self-assign supporting 2 cleaners + Zapier hook
   const assignToMe = async (jobId: string) => {
     if (!uid) return alert('Not signed in');
+    if (!confirm('Assign this job to you and send you the booking details?')) return;
     try {
       const dref = doc(db, 'bookings', jobId);
       const snap = await getDoc(dref);
@@ -439,8 +475,18 @@ export default function Jobs() {
         return;
       }
 
+      const staffRef = doc(db, 'staff', uid);
+      const staffSnap = await getDoc(staffRef);
+      const staff = staffSnap.exists() ? (staffSnap.data() as Record<string, unknown>) : {};
+
+      const myName =
+        auth.currentUser?.displayName ||
+        (staff['name'] as string | undefined) ||
+        (staff['fullName'] as string | undefined) ||
+        (staff['bankAccountName'] as string | undefined) ||
+        'Staff Member';
+
       const nextIds = [...ids, uid].slice(0, need);
-      const myName = auth.currentUser?.displayName || 'Staff Member';
       const nextNames = [...names, myName].slice(0, need);
 
       await updateDoc(dref, {
@@ -449,9 +495,131 @@ export default function Jobs() {
         assignedStaffId: nextIds[0] ?? null,
         assignedStaffName: nextNames[0] ?? null,
       });
+
+      try {
+        const staffEmail =
+          auth.currentUser?.email ||
+          (staff['email'] as string | undefined) ||
+          '';
+
+        const staffPhone =
+          (staff['phone'] as string | undefined) ||
+          auth.currentUser?.phoneNumber ||
+          (staff['mobile'] as string | undefined) ||
+          '';
+
+        const estimatedHours = Number(data.estimatedHours ?? 0) || 0;
+        const staffPay = estimatedHours ? estimatedHours * staffRate : 0;
+
+        const postcode =
+          typeof data.address === 'string'
+            ? data.address
+            : (data.address?.postcode as string | undefined) || '';
+
+        const time =
+          data.endTime && data.endTime !== data.startTime
+            ? `${data.startTime} - ${data.endTime}`
+            : data.startTime || '';
+
+        const snippet = `New booking: ${data.customerName || 'Customer'} - ${postcode} on ${formatUKDate(
+          data.date || ''
+        )} at ${time || 'time TBC'} • Pay: ${
+          staffPay ? currency.format(staffPay) : currency.format(0)
+        }`;
+
+        await fetch('https://hooks.zapier.com/hooks/catch/22652608/u85aagf/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            trigger: 'booking_assigned',
+            jobId,
+            staffId: uid,
+            staffName: myName,
+            staffEmail,
+            staffPhone,
+            customerName: data.customerName || '',
+            postcode,
+            date: data.date || '',
+            time,
+            estimatedHours,
+            staffPay,
+            snippet,
+          }),
+        });
+      } catch (zapErr) {
+        console.error('Zapier assign webhook failed', zapErr);
+      }
     } catch (e) {
       console.error(e);
       alert(getErrorMessage(e) || 'Failed to assign job');
+    }
+  };
+
+  const confirmBooking = async (job: Job) => {
+    if (!uid) return alert('Not signed in');
+    if (!confirm('Confirm you will attend this booking?')) return;
+    try {
+      const staffRef = doc(db, 'staff', uid);
+      const staffSnap = await getDoc(staffRef);
+      const staff = staffSnap.exists() ? (staffSnap.data() as Record<string, unknown>) : {};
+
+      const staffName =
+        auth.currentUser?.displayName ||
+        (staff['name'] as string | undefined) ||
+        (staff['fullName'] as string | undefined) ||
+        (staff['bankAccountName'] as string | undefined) ||
+        'Staff Member';
+
+      const staffEmail =
+        auth.currentUser?.email ||
+        (staff['email'] as string | undefined) ||
+        '';
+
+      const staffPhone =
+        (staff['phone'] as string | undefined) ||
+        auth.currentUser?.phoneNumber ||
+        (staff['mobile'] as string | undefined) ||
+        '';
+
+      const postcode =
+        typeof job.address === 'string'
+          ? job.address
+          : (job.address?.postcode as string | undefined) || '';
+
+      const estimatedHours = Number(job.estimatedHours ?? 0) || 0;
+      const staffPay = estimatedHours ? estimatedHours * staffRate : 0;
+
+      const snippet = `Booking confirmed: ${job.customerName || 'Customer'} - ${postcode} on ${formatUKDate(
+        job.date || ''
+      )} at ${job.displayTime || job.startTime || ''} • Pay: ${
+        staffPay ? currency.format(staffPay) : currency.format(0)
+      }`;
+
+      await fetch('https://hooks.zapier.com/hooks/catch/22652608/u85wg6z/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          trigger: 'booking_confirmed',
+          jobId: job.id,
+          staffId: uid,
+          staffName,
+          staffEmail,
+          staffPhone,
+          customerName: job.customerName || '',
+          postcode,
+          date: job.date || '',
+          time: job.displayTime || job.startTime || '',
+          estimatedHours,
+          staffPay,
+          snippet,
+        }),
+      });
+
+      setConfirmedJobs(prev => prev.includes(job.id) ? prev : [...prev, job.id]);
+      alert('Booking confirmed. Thank you!');
+    } catch (e) {
+      console.error(e);
+      alert(getErrorMessage(e) || 'Failed to confirm booking');
     }
   };
 
@@ -757,7 +925,7 @@ export default function Jobs() {
             )}
 
             <div className="flex items-center justify-between mb-3">
-              <div className="text-sm font-medium text-gray-900">Step <span>{step + 1}</span> / 13</div>
+              <div className="text-sm font-medium text-gray-900">Step <span>{step + 1}</span> / 14</div>
               <div className="flex items-center gap-2">
                 <button
                   onClick={back}
@@ -769,7 +937,7 @@ export default function Jobs() {
                   Back
                 </button>
 
-                {step < 12 ? (
+                {step < 13 ? (
                   <button
                     onClick={next}
                     disabled={!isValid}
@@ -794,337 +962,375 @@ export default function Jobs() {
             </div>
 
             {/* BODY (unchanged fields) */}
-            <div className="space-y-2">
-              {step === 0 && (
-                <div>
-                  <div className="text-base font-semibold text-gray-900 mb-1">What is your home postcode?</div>
-                  <p className="text-sm text-gray-800 mb-2">We use this to match you with nearby jobs.</p>
-                  <input className={inputCls} placeholder="e.g., M1 2AB" value={homePostcode} onChange={(e) => setHomePostcode(e.target.value)} />
-                </div>
-              )}
+            <div className="space-y-2 relative overflow-hidden">
+              <div
+                key={step}
+                className={`step-panel ${stepDirection === 'forward' ? 'step-forward' : 'step-backward'}`}
+              >
+                {step === 0 && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">What is your home postcode?</div>
+                    <p className="text-sm text-gray-800 mb-2">We use this to match you with nearby jobs.</p>
+                    <input className={inputCls} placeholder="e.g., M1 2AB" value={homePostcode} onChange={(e) => setHomePostcode(e.target.value)} />
+                  </div>
+                )}
 
-              {step === 1 && (
-                <div>
-                  <div className="text-base font-semibold text-gray-900 mb-1">How far can you travel (miles)?</div>
-                  <p className="text-sm text-gray-800 mb-3">Adjust the distance and see the area you can cover.</p>
+                {step === 1 && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">How far can you travel (miles)?</div>
+                    <p className="text-sm text-gray-800 mb-3">Adjust the distance and see the area you can cover.</p>
 
-                  <div className="flex items-center gap-3 mb-3">
-                    <button type="button" className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-gray-900 text-white text-lg font-bold hover:opacity-90 cursor-pointer" onClick={() => bumpRadius(-1)} aria-label="Decrease miles">−</button>
-                    <div className="text-sm font-semibold text-gray-900 min-w-[90px] text-center">
-                      {radiusMiles} mile{radiusMiles === 1 ? '' : 's'}
+                    <div className="flex items-center gap-3 mb-3">
+                      <button type="button" className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-gray-900 text-white text-lg font-bold hover:opacity-90 cursor-pointer" onClick={() => bumpRadius(-1)} aria-label="Decrease miles">−</button>
+                      <div className="text-sm font-semibold text-gray-900 min-w-[90px] text-center">
+                        {radiusMiles} mile{radiusMiles === 1 ? '' : 's'}
+                      </div>
+                      <button type="button" className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-[#0071bc] text-white text-lg font-bold hover:opacity-95 cursor-pointer" onClick={() => bumpRadius(1)} aria-label="Increase miles">+</button>
                     </div>
-                    <button type="button" className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-[#0071bc] text-white text-lg font-bold hover:opacity-95 cursor-pointer" onClick={() => bumpRadius(1)} aria-label="Increase miles">+</button>
+
+                    <div className="h-64 w-full overflow-hidden rounded-xl border border-gray-200">
+                      {!mapCenter && (
+                        <div className="h-full w-full flex items-center justify-center text-sm text-gray-800">
+                          {geoLoading ? 'Locating postcode…' : 'Enter a valid UK postcode first'}
+                        </div>
+                      )}
+                      {mapCenter && (
+                        <MapContainer
+                          center={mapCenter}
+                          zoom={9}
+                          whenCreated={(m) => { mapRef.current = m as unknown as LeafletMapLike; }}
+                          style={{ height: '100%', width: '100%' }}
+                          scrollWheelZoom
+                        >
+                          <TileLayer
+                            attribution='&copy; OpenStreetMap contributors &copy; CARTO'
+                            url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+                          />
+                          <Circle center={mapCenter} radius={20} pathOptions={{ color: '#111827', fillColor: '#111827', fillOpacity: 0.9 }} />
+                          <Circle center={mapCenter} radius={milesToMeters(radiusMiles)} pathOptions={{ color: '#0ea5e9', fillColor: '#38bdf8', fillOpacity: 0.12 }} />
+                        </MapContainer>
+                      )}
+                    </div>
                   </div>
+                )}
 
-                  <div className="h-64 w-full overflow-hidden rounded-xl border border-gray-200">
-                    {!mapCenter && (
-                      <div className="h-full w-full flex items-center justify-center text-sm text-gray-800">
-                        {geoLoading ? 'Locating postcode…' : 'Enter a valid UK postcode first'}
-                      </div>
-                    )}
-                    {mapCenter && (
-                      <MapContainer
-                        center={mapCenter}
-                        zoom={12}
-                        whenCreated={(m) => { mapRef.current = m as unknown as LeafletMapLike; }}
-                        style={{ height: '100%', width: '100%' }}
-                        scrollWheelZoom
-                      >
-                        <TileLayer
-                          attribution='&copy; OpenStreetMap contributors &copy; CARTO'
-                          url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-                        />
-                        <Circle center={mapCenter} radius={20} pathOptions={{ color: '#111827', fillColor: '#111827', fillOpacity: 0.9 }} />
-                        <Circle center={mapCenter} radius={milesToMeters(radiusMiles)} pathOptions={{ color: '#0ea5e9', fillColor: '#38bdf8', fillOpacity: 0.12 }} />
-                      </MapContainer>
-                    )}
+                {step === 2 && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">Notice time before jobs (hours)</div>
+                    <input
+                      className={inputCls}
+                      type="number"
+                      min={0}
+                      max={168}
+                      placeholder="Enter hours"
+                      value={Number.isFinite(minNoticeHours) ? String(minNoticeHours) : ''}
+                      onChange={(e) => setMinNoticeHours(e.target.value === '' ? (NaN as unknown as number) : Number(e.target.value))}
+                    />
                   </div>
-                </div>
-              )}
+                )}
 
-              {step === 2 && (
-                <div>
-                  <div className="text-base font-semibold text-gray-900 mb-1">Notice time before jobs (hours)</div>
-                  <input
-                    className={inputCls}
-                    type="number"
-                    min={0}
-                    max={168}
-                    placeholder="Enter hours"
-                    value={Number.isFinite(minNoticeHours) ? String(minNoticeHours) : ''}
-                    onChange={(e) => setMinNoticeHours(e.target.value === '' ? (NaN as unknown as number) : Number(e.target.value))}
-                  />
-                </div>
-              )}
-
-              {step === 3 && (
-                <div>
-                  <div className="text-base font-semibold text-gray-900 mb-1">Gap needed between jobs (minutes)</div>
-                  <select className={inputCls} value={String(travelBufferMins)} onChange={(e) => setTravelBufferMins(Number(e.target.value))}>
-                    {[0,15,30,45,60,90].map(n => <option key={n} value={n}>{n}</option>)}
-                  </select>
-                </div>
-              )}
-
-              {step === 4 && (
-                <div>
-                  <div className="text-base font-semibold text-gray-900 mb-2">Weekly availability</div>
-                  <div className="space-y-2 max-h-72 overflow-auto pr-1">
-                    {(Object.keys(availability) as DayName[]).map((day) => (
-                      <div key={day} className="flex flex-wrap items-center gap-2 border rounded-lg p-3">
-                        <div className="w-28 font-medium text-gray-900">{day}</div>
-                        <label className="inline-flex items-center gap-2 text-gray-900">
-                          <input type="checkbox" className="h-4 w-4" checked={availability[day].available} onChange={(e) => setDay(day, 'available', e.target.checked)} />
-                          Available
-                        </label>
-                        {availability[day].available && (
-                          <div className="flex flex-wrap items-center gap-2 ml-auto">
-                            <input aria-label={`${day} start time`} type="time" className="h-10 px-2 rounded border border-gray-300 w-28 text-gray-900" value={availability[day].from} onChange={(e) => setDay(day, 'from', e.target.value)} />
-                            <span className="text-sm text-gray-900">–</span>
-                            <input aria-label={`${day} end time`} type="time" className="h-10 px-2 rounded border border-gray-300 w-28 text-gray-900" value={availability[day].to} onChange={(e) => setDay(day, 'to', e.target.value)} />
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                {step === 3 && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">Gap needed between jobs (minutes)</div>
+                    <select className={inputCls} value={String(travelBufferMins)} onChange={(e) => setTravelBufferMins(Number(e.target.value))}>
+                      {[0,15,30,45,60,90].map(n => <option key={n} value={n}>{n}</option>)}
+                    </select>
                   </div>
-                </div>
-              )}
+                )}
 
-              {step === 5 && (
-                <div>
-                  <div className="text-base font-semibold text-gray-900 mb-1">Do you have a car?</div>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setHasCar(false)}
-                      className={`px-3 py-1.5 rounded border cursor-pointer ${
-                        hasCar === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
-                      }`}
-                    >
-                      No
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setHasCar(true)}
-                      className={`px-3 py-1.5 rounded border cursor-pointer ${
-                        hasCar === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
-                      }`}
-                    >
-                      Yes
-                    </button>
+                {step === 4 && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-2">Weekly availability</div>
+                    <div className="space-y-2 max-h-72 overflow-auto pr-1">
+                      {(Object.keys(availability) as DayName[]).map((day) => (
+                        <div key={day} className="flex flex-wrap items-center gap-2 border rounded-lg p-3">
+                          <div className="w-28 font-medium text-gray-900">{day}</div>
+                          <label className="inline-flex items-center gap-2 text-gray-900">
+                            <input type="checkbox" className="h-4 w-4" checked={availability[day].available} onChange={(e) => setDay(day, 'available', e.target.checked)} />
+                            Available
+                          </label>
+                          {availability[day].available && (
+                            <div className="flex flex-wrap items-center gap-2 ml-auto">
+                              <input aria-label={`${day} start time`} type="time" className="h-10 px-2 rounded border border-gray-300 w-28 text-gray-900" value={availability[day].from} onChange={(e) => setDay(day, 'from', e.target.value)} />
+                              <span className="text-sm text-gray-900">–</span>
+                              <input aria-label={`${day} end time`} type="time" className="h-10 px-2 rounded border border-gray-300 w-28 text-gray-900" value={availability[day].to} onChange={(e) => setDay(day, 'to', e.target.value)} />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {step === 6 && (
-                <div>
-                  <div className="text-base font-semibold text-gray-900 mb-1">Do you have your own supplies?</div>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setBringsSupplies(false)}
-                      className={`px-3 py-1.5 rounded border cursor-pointer ${
-                        bringsSupplies === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
-                      }`}
-                    >
-                      No
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setBringsSupplies(true)}
-                      className={`px-3 py-1.5 rounded border cursor-pointer ${
-                        bringsSupplies === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
-                      }`}
-                    >
-                      Yes
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {step === 7 && bringsSupplies && (
-                <div>
-                  <div className="text-base font-semibold text-gray-900 mb-1">Which equipment can you bring?</div>
-                  <div className="flex flex-wrap gap-2">
-                    {[
-                      ['vacuum','Vacuum cleaner'],
-                      ['mopBucket','Mop & bucket'],
-                      ['duster','Duster'],
-                      ['broomDustpan','Broom & dustpan'],
-                      ['microfibre','Microfibre cloths'],
-                      ['spotCleaner','Carpet spot cleaner (handheld)'],
-                      ['none','None of the above'],
-                    ].map(([key,label]) => (
-                      <button
-                        key={key}
-                        type="button"
-                        onClick={() => {
-                          if (key === 'none') {
-                            setEquipment(['none']);
-                          } else {
-                            const next = equipment.includes('none') ? [] : [...equipment];
-                            if (next.includes(key)) {
-                              setEquipment(next.filter(k => k !== key));
-                            } else {
-                              setEquipment([...next, key]);
-                            }
-                          }
-                        }}
-                        className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          equipment.includes(key) ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {step === 7 && !bringsSupplies && (
-                <div>
-                  <div className="text-base font-semibold text-gray-900 mb-1">Equipment</div>
-                  <p className="text-sm text-gray-700">You indicated you don't bring your own supplies, so we'll skip the equipment question.</p>
-                </div>
-              )}
-
-              {step === 8 && (
-                <div>
-                  <div className="text-base font-semibold text-gray-900 mb-1">Are you allergic to any animals?</div>
-                  <div className="space-y-3">
+                {step === 5 && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">Do you have a car?</div>
                     <div className="flex gap-2">
                       <button
                         type="button"
-                        onClick={() => setPets([])}
+                        onClick={() => setHasCar(false)}
                         className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          pets.length === 0 ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                          hasCar === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
                         }`}
                       >
                         No
                       </button>
                       <button
                         type="button"
-                        onClick={() => {
-                          if (pets.length === 0) setPets(['dogs']);
-                        }}
+                        onClick={() => setHasCar(true)}
                         className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          pets.length > 0 ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                          hasCar === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
                         }`}
                       >
                         Yes
                       </button>
                     </div>
-                    
-                    {pets.length > 0 && (
-                      <div>
-                        <p className="text-sm text-gray-700 mb-2">Select all animals you're allergic to:</p>
-                        <div className="flex flex-wrap gap-2">
-                          {[
-                            ['dogs','Dogs'],
-                            ['cats','Cats'],
-                            ['birds','Birds'],
-                            ['rabbits','Rabbits'],
-                            ['rodents','Rodents (hamsters, guinea pigs, etc.)'],
-                            ['reptiles','Reptiles'],
-                            ['horses','Horses'],
-                          ].map(([key,label]) => (
-                            <button
-                              key={key}
-                              type="button"
-                              onClick={() => {
-                                if (pets.includes(key)) {
-                                  const remaining = pets.filter(p => p !== key);
-                                  setPets(remaining.length > 0 ? remaining : [key]);
-                                } else {
-                                  setPets([...pets, key]);
-                                }
-                              }}
-                              className={`px-3 py-1.5 rounded border cursor-pointer ${
-                                pets.includes(key) ? 'border-[#0071bc] bg-[#0071bc] text-white' : 'border-gray-300 text-gray-800 hover:border-gray-400'
-                              }`}
-                            >
-                              {label}
-                            </button>
-                          ))}
-                        </div>
-                        <p className="text-xs text-gray-600 mt-2">Click to select/deselect. You can choose multiple.</p>
-                      </div>
-                    )}
                   </div>
-                </div>
-              )}
+                )}
 
-              {step === 9 && (
-                <div>
-                  <div className="text-base font-semibold text-gray-900 mb-1">Services you can do</div>
-                  <div className="flex flex-wrap gap-2">
-                    {[
-                      ['standard','Standard clean'],
-                      ['deep','Deep clean'],
-                      ['eot','End of tenancy / Move-out'],
-                      ['oven','Oven clean'],
-                      ['fridge','Fridge clean'],
-                      ['laundry','Laundry / Ironing'],
-                      ['spotClean','Carpet / Upholstery spot clean'],
-                    ].map(([key,label]) => (
+                {step === 6 && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">Do you have your own supplies?</div>
+                    <div className="flex gap-2">
                       <button
-                        key={key}
                         type="button"
-                        onClick={()=>toggleIn(services, key, setServices)}
+                        onClick={() => setBringsSupplies(false)}
                         className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          services.includes(key) ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                          bringsSupplies === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
                         }`}
                       >
-                        {label}
+                        No
                       </button>
-                    ))}
+                      <button
+                        type="button"
+                        onClick={() => setBringsSupplies(true)}
+                        className={`px-3 py-1.5 rounded border cursor-pointer ${
+                          bringsSupplies === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                        }`}
+                      >
+                        Yes
+                      </button>
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {step === 10 && (
-                <div>
-                  <div className="text-base font-semibold text-gray-900 mb-1">Okay with team jobs?</div>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setTeamJobs(false)}
-                      className={`px-3 py-1.5 rounded border cursor-pointer ${
-                        teamJobs === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
-                      }`}
-                    >
-                      No
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setTeamJobs(true)}
-                      className={`px-3 py-1.5 rounded border cursor-pointer ${
-                        teamJobs === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
-                      }`}
-                    >
-                      Yes
-                    </button>
+                {step === 7 && bringsSupplies && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">Which equipment can you bring?</div>
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        ['vacuum','Vacuum cleaner'],
+                        ['mopBucket','Mop & bucket'],
+                        ['duster','Duster'],
+                        ['broomDustpan','Broom & dustpan'],
+                        ['microfibre','Microfibre cloths'],
+                        ['spotCleaner','Carpet spot cleaner (handheld)'],
+                        ['none','None of the above'],
+                      ].map(([key,label]) => (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={() => {
+                            if (key === 'none') {
+                              setEquipment(['none']);
+                            } else {
+                              const next = equipment.includes('none') ? [] : [...equipment];
+                              if (next.includes(key)) {
+                                setEquipment(next.filter(k => k !== key));
+                              } else {
+                                setEquipment([...next, key]);
+                              }
+                            }
+                          }}
+                          className={`px-3 py-1.5 rounded border cursor-pointer ${
+                            equipment.includes(key) ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {step === 11 && (
-                <div>
-                  <div className="text-base font-semibold text-gray-900 mb-1">Right to work in the UK</div>
-                  <p className="text-sm text-gray-800 mb-2">Confirm you're legally allowed to work in the UK. You may be asked to provide proof.</p>
-                  <label className="inline-flex items-center gap-2 text-gray-900">
-                    <input type="checkbox" className="h-4 w-4" checked={rightToWorkUk} onChange={(e)=>setRightToWorkUk(e.target.checked)} />
-                    I confirm I have the right to work in the UK
-                  </label>
-                </div>
-              )}
+                {step === 7 && !bringsSupplies && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">Equipment</div>
+                    <p className="text-sm text-gray-700">You indicated you don't bring your own supplies, so we'll skip the equipment question.</p>
+                  </div>
+                )}
 
-              {step === 12 && (
-                <div>
-                  <div className="text-base font-semibold text-gray-900 mb-1">Date of birth</div>
-                  <input className={inputCls} type="date" value={dateOfBirth} onChange={(e)=>setDateOfBirth(e.target.value)} />
-                </div>
-              )}
+                {step === 8 && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">Are you allergic to any animals?</div>
+                    <div className="space-y-3">
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setPets([])}
+                          className={`px-3 py-1.5 rounded border cursor-pointer ${
+                            pets.length === 0 ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                          }`}
+                        >
+                          No
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (pets.length === 0) setPets(['dogs']);
+                          }}
+                          className={`px-3 py-1.5 rounded border cursor-pointer ${
+                            pets.length > 0 ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                          }`}
+                        >
+                          Yes
+                        </button>
+                      </div>
+                      
+                      {pets.length > 0 && (
+                        <div>
+                          <p className="text-sm text-gray-700 mb-2">Select all animals you're allergic to:</p>
+                          <div className="flex flex-wrap gap-2">
+                            {[
+                              ['dogs','Dogs'],
+                              ['cats','Cats'],
+                              ['birds','Birds'],
+                              ['rabbits','Rabbits'],
+                              ['rodents','Rodents (hamsters, guinea pigs, etc.)'],
+                              ['reptiles','Reptiles'],
+                              ['horses','Horses'],
+                            ].map(([key,label]) => (
+                              <button
+                                key={key}
+                                type="button"
+                                onClick={() => {
+                                  if (pets.includes(key)) {
+                                    const remaining = pets.filter(p => p !== key);
+                                    setPets(remaining.length > 0 ? remaining : [key]);
+                                  } else {
+                                    setPets([...pets, key]);
+                                  }
+                                }}
+                                className={`px-3 py-1.5 rounded border cursor-pointer ${
+                                  pets.includes(key) ? 'border-[#0071bc] bg-[#0071bc] text-white' : 'border-gray-300 text-gray-800 hover:border-gray-400'
+                                }`}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                          <p className="text-xs text-gray-600 mt-2">Click to select/deselect. You can choose multiple.</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {step === 9 && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">Services you can do</div>
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        ['standard','Standard clean'],
+                        ['deep','Deep clean'],
+                        ['eot','End of tenancy / Move-out'],
+                        ['oven','Oven clean'],
+                        ['fridge','Fridge clean'],
+                        ['laundry','Laundry / Ironing'],
+                        ['spotClean','Carpet / Upholstery spot clean'],
+                      ].map(([key,label]) => (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={()=>toggleIn(services, key, setServices)}
+                          className={`px-3 py-1.5 rounded border cursor-pointer ${
+                            services.includes(key) ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {step === 10 && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">Okay with team jobs?</div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setTeamJobs(false)}
+                        className={`px-3 py-1.5 rounded border cursor-pointer ${
+                          teamJobs === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                        }`}
+                      >
+                        No
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTeamJobs(true)}
+                        className={`px-3 py-1.5 rounded border cursor-pointer ${
+                          teamJobs === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                        }`}
+                      >
+                        Yes
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {step === 11 && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">Right to work in the UK</div>
+                    <p className="text-sm text-gray-800 mb-2">Confirm you're legally allowed to work in the UK. You may be asked to provide proof.</p>
+                    <label className="inline-flex items-center gap-2 text-gray-900">
+                      <input type="checkbox" className="h-4 w-4" checked={rightToWorkUk} onChange={(e)=>setRightToWorkUk(e.target.checked)} />
+                      I confirm I have the right to work in the UK
+                    </label>
+                  </div>
+                )}
+
+                {step === 12 && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">Date of birth</div>
+                    <input className={inputCls} type="date" value={dateOfBirth} onChange={(e)=>setDateOfBirth(e.target.value)} />
+                  </div>
+                )}
+
+                {step === 13 && (
+                  <div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">Bank details</div>
+                    <p className="text-sm text-gray-800 mb-2">We use these details to pay you for completed jobs.</p>
+                    <div className="space-y-2">
+                      <input
+                        className={inputCls}
+                        placeholder="Account holder name"
+                        value={bankAccountName}
+                        onChange={(e) => setBankAccountName(e.target.value)}
+                      />
+                      <input
+                        className={inputCls}
+                        placeholder="Bank name"
+                        value={bankName}
+                        onChange={(e) => setBankName(e.target.value)}
+                      />
+                      <input
+                        className={inputCls}
+                        placeholder="Sort code"
+                        value={bankSortCode}
+                        onChange={(e) => setBankSortCode(e.target.value)}
+                      />
+                      <input
+                        className={inputCls}
+                        placeholder="Account number"
+                        value={bankAccountNumber}
+                        onChange={(e) => setBankAccountNumber(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
 
               {stepError && <p className="text-sm text-red-600">{stepError}</p>}
             </div>
@@ -1230,11 +1436,12 @@ export default function Jobs() {
           ) : (
             myJobs.map((job) => {
               const teamNote = twoCleanerLine(job);
+              const isConfirmed = confirmedJobs.includes(job.id);
               return (
                 <article
                   key={job.id}
                   className="bg-white rounded-2xl shadow p-4 md:p-5 border border-gray-100"
-                  style={{ borderLeftWidth: 6, borderLeftColor: '#16a34a' }}
+                  style={{ borderLeftWidth: 6, borderLeftColor: isConfirmed ? '#16a34a' : '#f59e0b' }}
                 >
                   <div className="md:flex md:items-start md:justify-between md:gap-6">
                     {/* LEFT content */}
@@ -1284,6 +1491,11 @@ export default function Jobs() {
                       <div className="flex items-center gap-2">
                         {job.twoCleaners && <Tag>2 cleaners</Tag>}
                         <Tag>{hoursTag(job)}</Tag>
+                        {isConfirmed && (
+                          <span className="px-2 py-1 rounded bg-green-50 border border-green-200 text-xs text-green-700">
+                            Confirmed
+                          </span>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-2">
@@ -1293,6 +1505,14 @@ export default function Jobs() {
                         >
                           Checklist
                         </button>
+                        {!isConfirmed && (
+                          <button
+                            onClick={() => confirmBooking(job)}
+                            className="bg-green-600 text-white px-3 py-2 rounded-md hover:opacity-95 text-sm"
+                          >
+                            Confirm
+                          </button>
+                        )}
                         <button
                           onClick={() => setViewJob(job)}
                           className="rounded-md border px-3 py-2 text-gray-800 hover:bg-gray-50 text-sm"
@@ -1382,6 +1602,39 @@ export default function Jobs() {
         </div>
       )}
 
+      <style jsx>{`
+        .step-panel {
+          animation-duration: 0.3s;
+          animation-timing-function: ease-out;
+          animation-fill-mode: both;
+        }
+        .step-forward {
+          animation-name: slide-in-right-fade;
+        }
+        .step-backward {
+          animation-name: slide-in-left-fade;
+        }
+        @keyframes slide-in-right-fade {
+          from {
+            opacity: 0;
+            transform: translateX(24px);
+          }
+          to {
+            opacity: 1;
+            transform: translateX(0);
+          }
+        }
+        @keyframes slide-in-left-fade {
+          from {
+            opacity: 0;
+            transform: translateX(-24px);
+          }
+          to {
+            opacity: 1;
+            transform: translateX(0);
+          }
+        }
+      `}</style>
     </div>
   );
 }

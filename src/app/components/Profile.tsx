@@ -43,6 +43,11 @@ type ProfileData = {
   services?: string[];
   teamJobs?: boolean | null;
   rightToWorkUk?: boolean;
+
+  bankAccountName?: string;
+  bankName?: string;
+  bankSortCode?: string;
+  bankAccountNumber?: string;
 };
 
 const blankAvailability: Record<DayName, DayAvail> = {
@@ -125,6 +130,10 @@ export default function Profile() {
     services: [],
     teamJobs: null,
     rightToWorkUk: false,
+    bankAccountName: '',
+    bankName: '',
+    bankSortCode: '',
+    bankAccountNumber: '',
   });
 
   // Modal for setting radius with map
@@ -195,6 +204,10 @@ export default function Profile() {
         services: Array.isArray(staff.services) ? staff.services : [],
         teamJobs,
         rightToWorkUk: !!staff.rightToWorkUk,
+        bankAccountName: staff.bankAccountName || '',
+        bankName: staff.bankName || '',
+        bankSortCode: staff.bankSortCode || '',
+        bankAccountNumber: staff.bankAccountNumber || '',
       });
 
       setLoading(false);
@@ -301,6 +314,10 @@ export default function Profile() {
         services: Array.isArray(form.services) ? form.services : [],
         teamJobs: form.teamJobs === true,
         rightToWorkUk: !!form.rightToWorkUk,
+        bankAccountName: form.bankAccountName || null,
+        bankName: form.bankName || null,
+        bankSortCode: form.bankSortCode || null,
+        bankAccountNumber: form.bankAccountNumber || null,
         updatedAt: new Date().toISOString(),
       },
       { merge: true }
@@ -348,6 +365,49 @@ export default function Profile() {
           <div>
             <label className="block text-base font-semibold text-gray-900 mb-0.5">Date of Birth</label>
             <input className={input} type="date" placeholder="DOB" value={form.dateOfBirth || ''} onChange={e=>setField('dateOfBirth', e.target.value)} />
+          </div>
+        </div>
+      </div>
+
+      {/* Bank details */}
+      <div className="rounded-xl border bg-white p-4 md:p-6 shadow-sm">
+        <h2 className="text-lg font-semibold text-gray-900 mb-3">Bank Details</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-base font-semibold text-gray-900 mb-0.5">Account holder name</label>
+            <input
+              className={input}
+              placeholder="Account holder name"
+              value={form.bankAccountName || ''}
+              onChange={e => setField('bankAccountName', e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-base font-semibold text-gray-900 mb-0.5">Bank name</label>
+            <input
+              className={input}
+              placeholder="Bank name"
+              value={form.bankName || ''}
+              onChange={e => setField('bankName', e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-base font-semibold text-gray-900 mb-0.5">Sort code</label>
+            <input
+              className={input}
+              placeholder="Sort code"
+              value={form.bankSortCode || ''}
+              onChange={e => setField('bankSortCode', e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-base font-semibold text-gray-900 mb-0.5">Account number</label>
+            <input
+              className={input}
+              placeholder="Account number"
+              value={form.bankAccountNumber || ''}
+              onChange={e => setField('bankAccountNumber', e.target.value)}
+            />
           </div>
         </div>
       </div>
@@ -735,7 +795,7 @@ export default function Profile() {
               ) : (
                 <MapContainer
                   center={mapCenter}
-                  zoom={12}
+                  zoom={9}
                   whenCreated={(m) => { mapRef.current = m as unknown as LeafletMapLike; }}
                   style={{ height: '100%', width: '100%' }}
                   scrollWheelZoom

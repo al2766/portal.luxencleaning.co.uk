@@ -61,8 +61,48 @@ type StaffRow = {
   id: string;
   name?: string;
   email?: string;
+  phone?: string;
   active?: boolean;
 };
+
+function formatShortDate(ymd?: string | null): string | null {
+  if (!ymd) return null;
+  const [y, m, d] = ymd.split('-').map(Number);
+  if (!y || !m || !d) return ymd;
+  return new Date(y, m - 1, d)
+    .toLocaleDateString('en-GB', {
+      day: '2-digit',
+      month: 'short',
+      year: '2-digit',
+    })
+    .toUpperCase(); // e.g. 29 NOV 25
+}
+
+
+function toE164UK(raw?: string | null): string | null {
+  if (!raw) return null;
+
+  // Keep digits only
+  const digits = raw.replace(/[^\d]/g, '');
+
+  // 0XXXXXXXXXX  -> +44XXXXXXXXXX
+  if (digits.startsWith('0') && digits.length >= 10) {
+    return '+44' + digits.slice(1);
+  }
+
+  // 44XXXXXXXXXX -> +44XXXXXXXXXX
+  if (digits.startsWith('44')) {
+    return '+' + digits;
+  }
+
+  // Already starts with + (assume ok)
+  if (raw.trim().startsWith('+')) {
+    return raw.trim();
+  }
+
+  // Fallback: if nothing matched, just return with + in front of digits
+  return '+' + digits;
+}
 
 const money = new Intl.NumberFormat('en-GB', {
   style: 'currency',
@@ -131,6 +171,7 @@ export default function Bookings() {
           id: d.id,
           name,
           email: (s.email as string | undefined) ?? undefined,
+          phone: (s.phone as string | undefined) ?? undefined,
           active: s.active !== false,
         };
       });
@@ -150,6 +191,7 @@ export default function Bookings() {
   );
 
   const assignTo = async (jobId: string, staffId: string, staffName: string) => {
+    // Always assign
     await updateDoc(doc(db, 'bookings', jobId), {
       assignedStaffIds: [staffId],
       assignedStaffNames: [staffName || 'Staff Member'],
@@ -157,6 +199,53 @@ export default function Bookings() {
       assignedStaffName: staffName || 'Staff Member',
     });
     setAssignFor(null);
+
+    // Ask if we should notify via Zapier
+    const notify = window.confirm('Do you want to send a notification to the staff member?');
+    if (!notify) return;
+
+    // Send Zapier webhook for single staff assignment
+    try {
+      const job = jobs.find(j => j.id === jobId);
+      const staffRow = staff.find(s => s.id === staffId);
+
+      const postcode =
+        typeof job?.address === 'string'
+          ? (job?.address || '')
+          : (job?.address?.postcode || '');
+
+      const staffPay =
+        job?.estimatedHours != null
+          ? (job.estimatedHours * 12.21).toFixed(2)
+          : '0.00';
+
+      const payload = {
+        trigger: 'booking_assigned',
+        jobId,
+        staffId,
+        staffName,
+        staffEmail: staffRow?.email ?? null,
+        staffPhone: toE164UK(staffRow?.phone ?? null),
+        twoCleaners: job?.twoCleaners ?? false,
+        customerName: job?.customerName ?? null,
+        postcode,
+        date: job?.date ?? null,
+        prettyDate: formatShortDate(job?.date ?? null),
+        time: job?.displayTime || job?.startTime || null,
+        estimatedHours: job?.estimatedHours ?? null,
+        totalPrice: job?.totalPrice ?? null,
+        staffPay,
+      };
+
+      await fetch('https://hooks.zapier.com/hooks/catch/22652608/u85wg6z/', {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (e) {
+      console.error('Failed to send Zapier assign webhook', e);
+    }
   };
 
   const assignTwo = async (jobId: string, ids: string[]) => {
@@ -164,6 +253,8 @@ export default function Bookings() {
     const names = chosen.map(
       id => staff.find(s => s.id === id)?.name || staff.find(s => s.id === id)?.email || 'Staff Member'
     );
+
+    // Always assign
     await updateDoc(doc(db, 'bookings', jobId), {
       assignedStaffIds: chosen,
       assignedStaffNames: names,
@@ -172,6 +263,53 @@ export default function Bookings() {
     });
     setAssignFor(null);
     setSelectedIds([]);
+
+    // Ask if we should notify via Zapier
+    const notify = window.confirm('Do you want to send notifications to the selected staff?');
+    if (!notify) return;
+
+    // Send Zapier webhook for two staff assignment
+    try {
+      const job = jobs.find(j => j.id === jobId);
+      const staffRows = chosen.map(id => staff.find(s => s.id === id));
+
+      const postcode =
+        typeof job?.address === 'string'
+          ? (job?.address || '')
+          : (job?.address?.postcode || '');
+
+      const staffPay =
+        job?.estimatedHours != null
+          ? (job.estimatedHours * 12.21).toFixed(2)
+          : '0.00';
+
+      const payload = {
+        trigger: 'booking_assigned',
+        jobId,
+        staffIds: chosen,
+        staffNames: names,
+        staffEmails: staffRows.map(r => r?.email ?? null),
+        staffPhones: staffRows.map(r => toE164UK(r?.phone ?? null)),
+        twoCleaners: job?.twoCleaners ?? false,
+        customerName: job?.customerName ?? null,
+        postcode,
+        date: job?.date ?? null,
+        prettyDate: formatShortDate(job?.date ?? null),
+        time: job?.displayTime || job?.startTime || null,
+        estimatedHours: job?.estimatedHours ?? null,
+        totalPrice: job?.totalPrice ?? null,
+        staffPay,
+      };
+
+      await fetch('https://hooks.zapier.com/hooks/catch/22652608/u85wg6z/', {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (e) {
+      console.error('Failed to send Zapier assign-two webhook', e);
+    }
   };
 
   const unassign = async (jobId: string) => {
@@ -216,68 +354,78 @@ export default function Bookings() {
     <div className="space-y-8">
       {/* Unassigned */}
       <section>
-        <h2 className="text-xl font-semibold mb-3 text-gray-900">Unassigned Bookings</h2>
-        {pending.length === 0 ? (
-          <div className="text-gray-500">No unassigned bookings.</div>
-        ) : (
-          <ul className="space-y-3">
-            {pending.map((j) => (
-              <li key={j.id} className="rounded-lg border bg-white p-4 shadow-sm">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="flex-1 min-w-0">
-                    <div className="font-semibold text-gray-900 truncate">{j.customerName || 'Customer'}</div>
-                    <div className="text-sm text-gray-700 truncate">{j.displayAddress}</div>
-                    <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-gray-700">
-                      <div>
-                        <span className="font-medium">{formatUKDate(j.date)}</span>
-                        <span className="text-gray-500"> • </span>
-                        <span>{j.displayTime || j.startTime || '—'}</span>
-                      </div>
-                      {j.twoCleaners && (
-                        <span className="px-2 py-0.5 rounded bg-gray-50 border text-xs text-gray-700">2 cleaners</span>
-                      )}
-                    </div>
+  <h2 className="text-xl font-semibold mb-3 text-gray-900">Unassigned Bookings</h2>
+  {pending.length === 0 ? (
+    <div className="text-gray-500">No unassigned bookings.</div>
+  ) : (
+    <ul className="space-y-3">
+      {pending.map((j) => (
+        <li key={j.id} className="rounded-lg border bg-white p-4 shadow-sm">
+          {/* match myJobs / assigned layout: stack on mobile, side-by-side on md+ */}
+          <div className="md:flex md:items-start md:justify-between md:gap-6">
+            {/* LEFT content */}
+            <div className="flex-1 min-w-0">
+              <div className="font-semibold text-gray-900 truncate">
+                {j.customerName || 'Customer'}
+              </div>
+              <div className="text-sm text-gray-700 truncate">{j.displayAddress}</div>
+              <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-gray-700">
+                <div>
+                  <span className="font-medium">{formatUKDate(j.date)}</span>
+                  <span className="text-gray-500"> • </span>
+                  <span>{j.displayTime || j.startTime || '—'}</span>
+                </div>
+                {j.twoCleaners && (
+                  <span className="px-2 py-0.5 rounded bg-gray-50 border text-xs text-gray-700">
+                    2 cleaners
+                  </span>
+                )}
+              </div>
 
-                    {typeof j.totalPrice === 'number' && (
-                      <div className="mt-2">
-                        <div className="text-sm font-semibold text-blue-600">{money.format(j.totalPrice)}</div>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="flex-shrink-0 flex flex-col items-end gap-2">
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => openAssign(j)}
-                        className="cursor-pointer rounded-md bg-[#0071bc] px-3 py-2 text-white hover:opacity-95 text-sm"
-                      >
-                        Assign
-                      </button>
-
-                      <button
-                        onClick={async () => {
-                          // lazy import same as jobs page if you want; keeping as-is (downloadChecklist exists in your jobs page)
-                          alert('Open the booking in the staff app to download checklist.');
-                        }}
-                        className="cursor-pointer rounded-md border px-3 py-2 text-gray-800 hover:bg-gray-50 text-sm"
-                      >
-                        Checklist
-                      </button>
-
-                      <button
-                        onClick={() => setViewBooking(j)}
-                        className="cursor-pointer rounded-md border px-3 py-2 text-gray-800 hover:bg-gray-50 text-sm"
-                      >
-                        View
-                      </button>
-                    </div>
+              {typeof j.totalPrice === 'number' && (
+                <div className="mt-2">
+                  <div className="text-sm font-semibold text-blue-600">
+                    {money.format(j.totalPrice)}
                   </div>
                 </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+              )}
+            </div>
+
+            {/* RIGHT actions – stacked below on mobile, right on md+ */}
+            <div className="mt-3 md:mt-0 flex-shrink-0 flex flex-col items-end gap-2 min-w-[180px]">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => openAssign(j)}
+                  className="cursor-pointer rounded-md bg-[#0071bc] px-3 py-2 text-white hover:opacity-95 text-sm"
+                >
+                  Assign
+                </button>
+
+                <button
+                  onClick={async () => {
+                    // lazy import same as jobs page if you want; keeping as-is (downloadChecklist exists in your jobs page)
+                    alert('Open the booking in the staff app to download checklist.');
+                  }}
+                  className="cursor-pointer rounded-md border px-3 py-2 text-gray-800 hover:bg-gray-50 text-sm"
+                >
+                  Checklist
+                </button>
+
+                <button
+                  onClick={() => setViewBooking(j)}
+                  className="cursor-pointer rounded-md border px-3 py-2 text-gray-800 hover:bg-gray-50 text-sm"
+                >
+                  View
+                </button>
+              </div>
+            </div>
+          </div>
+        </li>
+      ))}
+    </ul>
+  )}
+</section>
+
 
       {/* Assigned */}
       <section>
@@ -292,10 +440,15 @@ export default function Bookings() {
                 className="rounded-lg bg-white p-4 shadow-sm"
                 style={{ borderLeft: '6px solid #16a34a', borderRight: '1px solid #e5e7eb', borderTop: '1px solid #e5e7eb', borderBottom: '1px solid #e5e7eb' }}
               >
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="flex-1 min-w-0">
-                    <div className="font-semibold text-gray-900 truncate">{j.customerName || 'Customer'}</div>
-                    <div className="text-sm text-gray-700 truncate">{j.displayAddress}</div>
+                {/* match myJobs layout: stack on mobile, side-by-side on md+ */}
+                <div className="md:flex md:items-start md:justify-between md:gap-6">
+                  {/* LEFT content */}
+                  <div className="flex-1 min-w-0 space-y-3">
+                    <div>
+                      <div className="font-semibold text-gray-900 truncate">{j.customerName || 'Customer'}</div>
+                      <div className="text-sm text-gray-700 truncate">{j.displayAddress}</div>
+                    </div>
+
                     <div className="mt-2 text-sm text-gray-700">
                       <span className="font-medium">{formatUKDate(j.date)}</span>
                       <span className="text-gray-500"> • </span>
@@ -315,7 +468,9 @@ export default function Bookings() {
                     )}
                   </div>
 
-                  <div className="flex-shrink-0 flex flex-col items-end gap-2">
+                  {/* RIGHT actions – stacked below on mobile, right on md+ */}
+                  <div className="mt-3 md:mt-0 flex-shrink-0 flex flex-col items-end gap-2 min-w-[180px]">
+                    {/* (no tags here, just keep the buttons layout same pattern as myJobs) */}
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() => openAssign(j)}
