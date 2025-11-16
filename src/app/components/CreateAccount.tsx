@@ -63,18 +63,16 @@ export default function CreateAccountPage() {
       // operational fields will be added later from the “Complete your profile” flow
     };
 
-    // Write both docs with NAME as the doc id
-    const safeId = name.replace(/[.#$/[\]]+/g, '_').trim() || uid;
-
+    // Write both docs with UID as the doc id
+    // try {
+    //   await setDoc(doc(db, 'users', uid), { ...baseUser }, { merge: true });
+    // } catch (e: any) {
+    //   throw new Error(`Failed to write users/${uid}: ${e?.message || e}`);
+    // }
     try {
-      await setDoc(doc(db, 'users', safeId), { ...baseUser }, { merge: true });
+      await setDoc(doc(db, 'staff', uid), { ...staffDoc }, { merge: true });
     } catch (e: any) {
-      throw new Error(`Failed to write users/${safeId}: ${e?.message || e}`);
-    }
-    try {
-      await setDoc(doc(db, 'staff', safeId), { ...staffDoc }, { merge: true });
-    } catch (e: any) {
-      throw new Error(`Failed to write staff/${safeId}: ${e?.message || e}`);
+      throw new Error(`Failed to write staff/${uid}: ${e?.message || e}`);
     }
   };
 

@@ -229,6 +229,8 @@ export default function Staff() {
               <div>
                 <div className="text-2xl font-bold text-gray-900">{viewMember.name || 'Staff member'}</div>
                 <div className="text-sm text-gray-600 mt-1">{viewMember.email || viewMember.phone || '—'}</div>
+                {/* NEW: show Firestore document ID / UID */}
+                <div className="text-xs text-gray-500 mt-1">ID: {viewMember.id}</div>
               </div>
               <div className="text-right">
                 <div className="text-sm text-gray-600">Role</div>

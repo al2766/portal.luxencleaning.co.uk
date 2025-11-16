@@ -15,6 +15,7 @@ import CreateAccount from './components/CreateAccount';
 import Staff from './components/Staff';
 import Finances from './components/Finances';
 import Bookings from './components/Bookings'; // ✅ NEW
+import Postcodes from './components/Postcodes'; // ✅ NEW
 import Settings from './components/Settings'; // ✅ NEW
 
 const ADMIN_EMAIL = 'luxencleaninguk@gmail.com';
@@ -26,6 +27,7 @@ type Tab =
   | 'staff'
   | 'finances'
   | 'bookings'
+  | 'postcodes'
   | 'settings'; // ✅ NEW tabs
 
 export default function StaffPage() {
@@ -79,7 +81,7 @@ export default function StaffPage() {
   useEffect(() => {
     if (
       !isAdmin &&
-      ['create', 'staff', 'finances', 'bookings', 'settings'].includes(tab)
+      ['create', 'staff', 'finances', 'bookings', 'postcodes', 'settings'].includes(tab)
     )
       setTab('jobs');
   }, [isAdmin, tab]);
@@ -89,7 +91,7 @@ export default function StaffPage() {
   // ------- Tabs -------
   const tabs: Tab[] = (['jobs', 'profile'] as Tab[]).concat(
     isAdmin
-      ? (['create', 'staff', 'finances', 'bookings', 'settings'] as Tab[])
+      ? (['create', 'staff', 'finances', 'bookings', 'postcodes', 'settings'] as Tab[])
       : []
   );
 
@@ -148,6 +150,8 @@ export default function StaffPage() {
                   ? 'Finances'
                   : t === 'bookings'
                   ? 'Bookings'
+                  : t === 'postcodes'
+                  ? 'Postcodes'
                   : 'Settings'}
               </button>
             ))}
@@ -176,6 +180,12 @@ export default function StaffPage() {
         {tab === 'bookings' &&
           (isAdmin ? (
             <Bookings />
+          ) : (
+            <div className="text-red-600">Not authorized.</div>
+          ))}
+        {tab === 'postcodes' &&
+          (isAdmin ? (
+            <Postcodes />
           ) : (
             <div className="text-red-600">Not authorized.</div>
           ))}

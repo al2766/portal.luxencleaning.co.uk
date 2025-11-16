@@ -4,12 +4,24 @@ import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth, db } from '@/lib/firebase';
 import {
-  collection, onSnapshot, query, updateDoc, doc, orderBy, getDoc, setDoc,
+  collection,
+  onSnapshot,
+  query,
+  updateDoc,
+  doc,
+  orderBy,
+  getDoc,
+  setDoc,
+  arrayUnion,
 } from 'firebase/firestore';
 
 import dynamic from 'next/dynamic';
 import 'leaflet/dist/leaflet.css';
-import type { MapContainerProps, TileLayerProps, CircleProps } from 'react-leaflet';
+import type {
+  MapContainerProps,
+  TileLayerProps,
+  CircleProps,
+} from 'react-leaflet';
 
 const staffRate = 12.21; // £/hour
 
@@ -19,24 +31,96 @@ const currency = new Intl.NumberFormat('en-GB', {
   maximumFractionDigits: 2,
 });
 
+// UPDATED: include extra small to match new room formats
+const SIZE_LABELS: Record<string, string> = {
+  xs: 'extra small',
+  s: 'small',
+  m: 'medium',
+  l: 'large',
+  xl: 'extra large',
+};
+
+const parseCount = (v?: number | string): number => {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+};
+
+// NEW: labels for room types from structured selections (home + office)
+const ROOM_TYPE_LABELS: Record<string, string> = {
+  // Home-style mappings
+  'open-plan': 'Living / open-plan area',
+  meeting: 'Bedroom',
+  'private-office': 'Home office / study',
+  reception: 'Hallway / landing',
+  corridor: 'Corridor',
+  storage: 'Storage / utility',
+  // Office-style extras
+  kitchen: 'Kitchen / tea point',
+  other: 'Other area',
+};
+
+const labelRoomType = (typeId?: string | null): string => {
+  if (!typeId) return 'Room';
+  const key = typeId.toLowerCase();
+  if (ROOM_TYPE_LABELS[key]) return ROOM_TYPE_LABELS[key];
+  return typeId
+    .replace(/-/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+};
+
 const MapContainer = dynamic<MapContainerProps>(
-  () => import('react-leaflet').then(m => m.MapContainer),
+  () => import('react-leaflet').then((m) => m.MapContainer),
   { ssr: false }
 );
 const TileLayer = dynamic<TileLayerProps>(
-  () => import('react-leaflet').then(m => m.TileLayer),
+  () => import('react-leaflet').then((m) => m.TileLayer),
   { ssr: false }
 );
 const Circle = dynamic<CircleProps>(
-  () => import('react-leaflet').then(m => m.Circle),
+  () => import('react-leaflet').then((m) => m.Circle),
   { ssr: false }
 );
 
 type Address =
   | string
   | {
-      line1?: string; line2?: string; town?: string; county?: string; postcode?: string;
+      line1?: string;
+      line2?: string;
+      town?: string;
+      county?: string;
+      postcode?: string;
     };
+
+// NEW: shared room/toilet selection types for newer bookings
+type RoomSelection = {
+  typeId?: string;
+  sizeId?: string;
+  count?: number;
+};
+
+type AreaSelection = {
+  sizeId?: string;
+  count?: number;
+};
+
+type OfficeDetails = {
+  roomsCount?: number;
+  rooms?: { typeId?: string; sizeId?: string }[];
+  kitchensCount?: number;
+  kitchenSizeId?: string;
+  toiletRoomsCount?: number;
+  avgCubicles?: number;
+  extras?: {
+    fridge?: number;
+    freezer?: number;
+    dishwasher?: number;
+    cupboards?: number;
+  };
+};
 
 type BookingDoc = {
   orderId: string;
@@ -51,11 +135,40 @@ type BookingDoc = {
   bathrooms?: number | string;
   livingRooms?: number | string;
   kitchens?: number | string;
+  utilityRooms?: number | string;
   additionalRooms?: string[] | string;
   addOns?: string[] | string;
   estimatedHours?: number;
   cleanliness?: string;
   serviceType?: string;
+  additionalInfo?: string;
+  office?: OfficeDetails;
+
+  // NEW: structured arrays for office / newer bookings
+  roomSelections?: RoomSelection[];
+  toiletSelections?: AreaSelection[];
+  toiletRoomsCount?: number;
+  avgCubicles?: number;
+  totalCubicles?: number;
+  toiletSizeId?: string;
+  staffCount?: number;
+  timeSlot?: string;
+
+  // NEW: booking-builder summaries used in checkout
+  roomSummaries?: {
+    label?: string;
+    typeId?: string;
+    sizes?: string[];
+    count?: number;
+  }[];
+  bathroomsSummary?: {
+    count?: number;
+    avgToiletsPerBathroom?: number;
+  };
+  kitchenSummary?: {
+    count?: number;
+    sizeId?: string;
+  };
 
   // legacy single fields
   assignedStaffId?: string | null;
@@ -65,6 +178,7 @@ type BookingDoc = {
   twoCleaners?: boolean;
   assignedStaffIds?: string[];
   assignedStaffNames?: string[];
+  confirmedStaffIds?: string[];
 };
 
 type Job = {
@@ -73,28 +187,63 @@ type Job = {
   displayAddress: string;
 } & BookingDoc;
 
-type DayName = 'Monday'|'Tuesday'|'Wednesday'|'Thursday'|'Friday'|'Saturday'|'Sunday';
+type DayName =
+  | 'Monday'
+  | 'Tuesday'
+  | 'Wednesday'
+  | 'Thursday'
+  | 'Friday'
+  | 'Saturday'
+  | 'Sunday';
 type DayAvail = { available: boolean; from: string; to: string };
 type Availability = Record<DayName, DayAvail>;
 
 const defaultAvailability: Availability = {
-  Monday:    { available: true,  from: '08:00', to: '18:00' },
-  Tuesday:   { available: true,  from: '08:00', to: '18:00' },
-  Wednesday: { available: true,  from: '08:00', to: '18:00' },
-  Thursday:  { available: true,  from: '08:00', to: '18:00' },
-  Friday:    { available: true,  from: '08:00', to: '18:00' },
-  Saturday:  { available: false, from: '09:00', to: '16:00' },
-  Sunday:    { available: false, from: '09:00', to: '16:00' },
+  Monday: { available: true, from: '08:00', to: '18:00' },
+  Tuesday: { available: true, from: '08:00', to: '18:00' },
+  Wednesday: { available: true, from: '08:00', to: '18:00' },
+  Thursday: { available: true, from: '08:00', to: '18:00' },
+  Friday: { available: true, from: '08:00', to: '18:00' },
+  Saturday: { available: false, from: '09:00', to: '16:00' },
+  Sunday: { available: false, from: '09:00', to: '16:00' },
 };
 
-function milesToMeters(mi: number) { return mi * 1609.34; }
+function milesToMeters(mi: number) {
+  return mi * 1609.34;
+}
+
+function toE164UK(raw?: string | null): string | null {
+  if (!raw) return null;
+
+  // Keep digits only
+  const digits = raw.replace(/[^\d]/g, '');
+
+  // 0XXXXXXXXXX  -> +44XXXXXXXXXX
+  if (digits.startsWith('0') && digits.length >= 10) {
+    return '+44' + digits.slice(1);
+  }
+
+  // 44XXXXXXXXXX -> +44XXXXXXXXXX
+  if (digits.startsWith('44')) {
+    return '+' + digits;
+  }
+
+  // Already starts with + (assume ok)
+  if (raw.trim().startsWith('+')) {
+    return raw.trim();
+  }
+
+  // Fallback: if nothing matched, just return with + in front of digits
+  return '+' + digits;
+}
 
 // NEW: compute bounding box for a circle in miles, for auto fit
 function circleBoundsFromMiles(center: [number, number], miles: number) {
   const [lat, lon] = center;
   const meters = miles * 1609.34;
   const dLat = meters / 111_320; // rough meters per degree latitude
-  const dLon = meters / (111_320 * Math.cos((lat * Math.PI) / 180) || 1);
+  const dLon =
+    meters / (111_320 * Math.cos((lat * Math.PI) / 180) || 1);
   const south = lat - dLat;
   const north = lat + dLat;
   const west = lon - dLon;
@@ -115,17 +264,33 @@ type LeafletMapLike = {
 function formatUKDate(dateStr: string): string {
   if (!dateStr) return '';
   const [year, month, day] = dateStr.split('-');
-  const date = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
-  return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+  const date = new Date(
+    parseInt(year),
+    parseInt(month) - 1,
+    parseInt(day)
+  );
+  return date.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  });
 }
 
 // helpers for two-cleaner model (works with legacy fields)
 function getAssignedIds(job: BookingDoc): string[] {
-  if (Array.isArray(job.assignedStaffIds) && job.assignedStaffIds.length) return job.assignedStaffIds.filter(Boolean) as string[];
+  if (
+    Array.isArray(job.assignedStaffIds) &&
+    job.assignedStaffIds.length
+  )
+    return job.assignedStaffIds.filter(Boolean) as string[];
   return job.assignedStaffId ? [job.assignedStaffId] : [];
 }
 function getAssignedNames(job: BookingDoc): string[] {
-  if (Array.isArray(job.assignedStaffNames) && job.assignedStaffNames.length) return job.assignedStaffNames.filter(Boolean) as string[];
+  if (
+    Array.isArray(job.assignedStaffNames) &&
+    job.assignedStaffNames.length
+  )
+    return job.assignedStaffNames.filter(Boolean) as string[];
   return job.assignedStaffName ? [job.assignedStaffName] : [];
 }
 function requiredCleaners(job: BookingDoc): number {
@@ -134,7 +299,9 @@ function requiredCleaners(job: BookingDoc): number {
 
 export default function Jobs() {
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [uid, setUid] = useState<string | null>(auth.currentUser?.uid ?? null);
+  const [uid, setUid] = useState<string | null>(
+    auth.currentUser?.uid ?? null
+  );
 
   const [needsProfile, setNeedsProfile] = useState<boolean>(false);
   const [checkedProfile, setCheckedProfile] = useState<boolean>(false);
@@ -143,7 +310,8 @@ export default function Jobs() {
   const [radiusMiles, setRadiusMiles] = useState<number>(10);
   const [minNoticeHours, setMinNoticeHours] = useState<number>(12);
   const [travelBufferMins, setTravelBufferMins] = useState<number>(30);
-  const [availability, setAvailability] = useState<Availability>(defaultAvailability);
+  const [availability, setAvailability] =
+    useState<Availability>(defaultAvailability);
 
   const [hasCar, setHasCar] = useState<boolean | null>(null);
   const [bringsSupplies, setBringsSupplies] = useState<boolean | null>(null);
@@ -161,31 +329,40 @@ export default function Jobs() {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string>('');
 
-  const [mapCenter, setMapCenter] = useState<[number, number] | null>(null);
+  const [mapCenter, setMapCenter] = useState<[number, number] | null>(
+    null
+  );
   const [geoLoading, setGeoLoading] = useState(false);
   const mapRef = useRef<LeafletMapLike | null>(null);
 
   const [autoAssign, setAutoAssign] = useState<boolean>(true);
 
   const [viewJob, setViewJob] = useState<Job | null>(null);
-  const [stepDirection, setStepDirection] = useState<'forward' | 'backward'>('forward');
+  const [stepDirection, setStepDirection] =
+    useState<'forward' | 'backward'>('forward');
   const [confirmedJobs, setConfirmedJobs] = useState<string[]>([]);
 
-  useEffect(() => onAuthStateChanged(auth, (u) => setUid(u?.uid ?? null)), []);
+  useEffect(
+    () => onAuthStateChanged(auth, (u) => setUid(u?.uid ?? null)),
+    []
+  );
 
   useEffect(() => {
     const ref = collection(db, 'bookings');
     const q = query(ref, orderBy('date', 'asc'));
     const unsub = onSnapshot(q, (snap) => {
-      const items: Job[] = snap.docs.map(d => {
+      const items: Job[] = snap.docs.map((d) => {
         const data = d.data() as BookingDoc;
         const start = data.startTime ?? '';
         const end = data.endTime ?? '';
         const displayTime = end && end !== start ? `${start} - ${end}` : start;
 
-        const addr = typeof data.address === 'string'
-          ? data.address
-          : [data.address?.line1, data.address?.town, data.address?.postcode].filter(Boolean).join(', ');
+        const addr =
+          typeof data.address === 'string'
+            ? data.address
+            : [data.address?.line1, data.address?.town, data.address?.postcode]
+                .filter(Boolean)
+                .join(', ');
 
         return { id: d.id, ...data, displayTime, displayAddress: addr };
       });
@@ -196,10 +373,14 @@ export default function Jobs() {
 
   useEffect(() => {
     const sref = doc(db, 'settings', 'general');
-    const unsub = onSnapshot(sref, (snap) => {
-      const data = snap.data() as { autoAssign?: boolean } | undefined;
-      setAutoAssign(Boolean(data?.autoAssign));
-    }, () => setAutoAssign(true));
+    const unsub = onSnapshot(
+      sref,
+      (snap) => {
+        const data = snap.data() as { autoAssign?: boolean } | undefined;
+        setAutoAssign(Boolean(data?.autoAssign));
+      },
+      () => setAutoAssign(true)
+    );
     return unsub;
   }, []);
 
@@ -207,7 +388,9 @@ export default function Jobs() {
     try {
       const sref = doc(db, 'staff', userId);
       const snap = await getDoc(sref);
-      const staff = snap.exists() ? (snap.data() as Record<string, unknown>) : {};
+      const staff = snap.exists()
+        ? (snap.data() as Record<string, unknown>)
+        : {};
       const pc = String(staff?.['homePostcode'] ?? '').trim();
       setNeedsProfile(!pc);
     } catch {
@@ -218,35 +401,56 @@ export default function Jobs() {
   }, []);
 
   useEffect(() => {
-    if (!uid) { setNeedsProfile(false); setCheckedProfile(true); return; }
+    if (!uid) {
+      setNeedsProfile(false);
+      setCheckedProfile(true);
+      return;
+    }
     setCheckedProfile(false);
     checkProfile(uid);
   }, [uid, checkProfile]);
 
   function isPostcodeUKish(v: string) {
-    return /^[A-Za-z]{1,2}\d[A-Za-z\d]?\s?\d[A-Za-z]{2}$/.test(v.trim());
+    return /^[A-Za-z]{1,2}\d[A-Za-z\d]?\s?\d[A-Za-z]{2}$/.test(
+      v.trim()
+    );
   }
 
   const stepError = useMemo(() => {
     switch (step) {
       case 0:
-        return isPostcodeUKish(homePostcode) ? '' : 'Enter a valid UK postcode (e.g., M1 2AB).';
+        return isPostcodeUKish(homePostcode)
+          ? ''
+          : 'Enter a valid UK postcode (e.g., M1 2AB).';
       case 1:
         if (!Number.isFinite(radiusMiles)) return 'Please enter a number.';
-        if (radiusMiles <= 0 || radiusMiles > 50) return 'Travel radius must be between 1–50 miles.';
+        if (radiusMiles <= 0 || radiusMiles > 50)
+          return 'Travel radius must be between 1–50 miles.';
         return '';
       case 2: {
         const v = Number(minNoticeHours);
-        if (Number.isFinite(v) && Number.isInteger(v) && v >= 0 && v <= 168) return '';
+        if (
+          Number.isFinite(v) &&
+          Number.isInteger(v) &&
+          v >= 0 &&
+          v <= 168
+        )
+          return '';
         return 'Enter whole hours between 0–168.';
       }
       case 3:
-        return [0,15,30,45,60,90].includes(travelBufferMins) ? '' : 'Select a buffer value.';
+        return [0, 15, 30, 45, 60, 90].includes(travelBufferMins)
+          ? ''
+          : 'Select a buffer value.';
       case 4: {
-        for (const [day, v] of Object.entries(availability) as [DayName, DayAvail][]) {
+        for (const [day, v] of Object.entries(
+          availability
+        ) as [DayName, DayAvail][]) {
           if (v.available) {
-            if (!v.from || !v.to) return `Please set both times for ${day}.`;
-            if (v.from >= v.to) return `${day}: end time must be after start time.`;
+            if (!v.from || !v.to)
+              return `Please set both times for ${day}.`;
+            if (v.from >= v.to)
+              return `${day}: end time must be after start time.`;
           }
         }
         return '';
@@ -271,13 +475,18 @@ export default function Jobs() {
       case 10:
         return teamJobs !== null ? '' : 'Please select yes or no.';
       case 11:
-        return rightToWorkUk ? '' : 'You must confirm you have the right to work in the UK.';
+        return rightToWorkUk
+          ? ''
+          : 'You must confirm you have the right to work in the UK.';
       case 12:
         return dateOfBirth && /^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)
           ? ''
           : 'Please enter your date of birth.';
       case 13:
-        return bankAccountName.trim() && bankName.trim() && bankSortCode.trim() && bankAccountNumber.trim()
+        return bankAccountName.trim() &&
+          bankName.trim() &&
+          bankSortCode.trim() &&
+          bankAccountNumber.trim()
           ? ''
           : 'Please enter your bank details.';
       default:
@@ -305,8 +514,8 @@ export default function Jobs() {
   ]);
 
   const isValid = !stepError;
-  const next = () => { 
-    setErr(''); 
+  const next = () => {
+    setErr('');
     if (!isValid) return;
     setStepDirection('forward');
     if (step === 6 && bringsSupplies === false) {
@@ -317,8 +526,8 @@ export default function Jobs() {
     }
   };
 
-  const back = () => { 
-    setErr(''); 
+  const back = () => {
+    setErr('');
     setStepDirection('backward');
     if (step === 8 && bringsSupplies === false) {
       setStep((s) => Math.max(s - 2, 0));
@@ -329,22 +538,40 @@ export default function Jobs() {
 
   useEffect(() => {
     async function geocode() {
-      if (!isPostcodeUKish(homePostcode)) { setMapCenter(null); return; }
+      if (!isPostcodeUKish(homePostcode)) {
+        setMapCenter(null);
+        return;
+      }
       try {
         setGeoLoading(true);
-        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(homePostcode)}&countrycodes=gb&limit=1`;
-        const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+          homePostcode
+        )}&countrycodes=gb&limit=1`;
+        const res = await fetch(url, {
+          headers: { 'Accept-Language': 'en' },
+        });
         const json = await res.json();
         if (Array.isArray(json) && json.length > 0) {
           const { lat, lon } = json[0];
-          const center: [number, number] = [parseFloat(lat), parseFloat(lon)];
+          const center: [number, number] = [
+            parseFloat(lat),
+            parseFloat(lon),
+          ];
           setMapCenter(center);
           // Smooth fit after setting center
           setTimeout(() => {
-            if (mapRef.current && mapRef.current.fitBounds && center) {
+            if (
+              mapRef.current &&
+              mapRef.current.fitBounds &&
+              center
+            ) {
               const bounds = circleBoundsFromMiles(center, radiusMiles);
               // @ts-ignore leaflet options typing
-              mapRef.current.fitBounds(bounds, { padding: [24, 24], animate: true, duration: 0.8 });
+              mapRef.current.fitBounds(bounds, {
+                padding: [24, 24],
+                animate: true,
+                duration: 0.8,
+              });
             }
           }, 0);
         } else {
@@ -366,11 +593,17 @@ export default function Jobs() {
     if (!mapRef.current || !mapCenter || !mapRef.current.fitBounds) return;
     const bounds = circleBoundsFromMiles(mapCenter, radiusMiles);
     // @ts-ignore leaflet options typing
-    mapRef.current.fitBounds(bounds, { padding: [24, 24], animate: true, duration: 0.8 });
+    mapRef.current.fitBounds(bounds, {
+      padding: [24, 24],
+      animate: true,
+      duration: 0.8,
+    });
   }, [mapCenter, radiusMiles]);
 
   const bumpRadius = (delta: number) => {
-    setRadiusMiles(prev => Math.max(1, Math.min(50, Math.round(prev + delta))));
+    setRadiusMiles((prev) =>
+      Math.max(1, Math.min(50, Math.round(prev + delta)))
+    );
   };
 
   const save = async () => {
@@ -379,7 +612,16 @@ export default function Jobs() {
       setSaving(true);
       setErr('');
 
-      const lower: Record<string, { available: boolean; startTime: string; endTime: string; from: string; to: string }> = {};
+      const lower: Record<
+        string,
+        {
+          available: boolean;
+          startTime: string;
+          endTime: string;
+          from: string;
+          to: string;
+        }
+      > = {};
       Object.entries(availability).forEach(([Day, v]) => {
         const key = Day.toLowerCase();
         lower[key] = {
@@ -391,41 +633,44 @@ export default function Jobs() {
         };
       });
 
-      await setDoc(doc(db, 'staff', uid), {
-        email: auth.currentUser?.email || '',
-        active: true,
-        homePostcode: homePostcode.trim().toUpperCase().replace(/\s+/g, ''),
-        radiusMiles: Number(radiusMiles),
-        radiusKm: Math.round(Number(radiusMiles) * 1.60934),
-        minNoticeHours: Number(minNoticeHours),
-        travelBufferMins: Number(travelBufferMins),
-        availability: lower,
-        hasCar: hasCar === true,
-        bringsSupplies: bringsSupplies === true,
-        equipment,
-        pets,
-        services,
-        teamJobs: teamJobs === true,
-        rightToWorkUk,
-        dateOfBirth: dateOfBirth || null,
-        bankAccountName: bankAccountName || null,
-        bankName: bankName || null,
-        bankSortCode: bankSortCode || null,
-        bankAccountNumber: bankAccountNumber || null,
-        updatedAt: new Date().toISOString(),
-      }, { merge: true });
-
-      await setDoc(doc(db, 'users', uid), {
-        email: auth.currentUser?.email || '',
-        role: 'cleaner',
-        updatedAt: new Date().toISOString(),
-      }, { merge: true });
+      await setDoc(
+        doc(db, 'staff', uid),
+        {
+          email: auth.currentUser?.email || '',
+          active: true,
+          homePostcode: homePostcode
+            .trim()
+            .toUpperCase()
+            .replace(/\s+/g, ''),
+          radiusMiles: Number(radiusMiles),
+          radiusKm: Math.round(Number(radiusMiles) * 1.60934),
+          minNoticeHours: Number(minNoticeHours),
+          travelBufferMins: Number(travelBufferMins),
+          availability: lower,
+          hasCar: hasCar === true,
+          bringsSupplies: bringsSupplies === true,
+          equipment,
+          pets,
+          services,
+          teamJobs: teamJobs === true,
+          rightToWorkUk,
+          dateOfBirth: dateOfBirth || null,
+          bankAccountName: bankAccountName || null,
+          bankName: bankName || null,
+          bankSortCode: bankSortCode || null,
+          bankAccountNumber: bankAccountNumber || null,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
 
       await checkProfile(uid);
       setStep(0);
       alert('Profile completed ✅');
     } catch (e) {
-      const msg = (e as { message?: string })?.message || 'Failed to save profile.';
+      const msg =
+        (e as { message?: string })?.message ||
+        'Failed to save profile.';
       setErr(msg);
     } finally {
       setSaving(false);
@@ -436,26 +681,36 @@ export default function Jobs() {
   const visibleUnassignedJobs = useMemo(() => {
     if (!uid) return [];
     if (!autoAssign) return [];
-    return jobs.filter(j => getAssignedIds(j).length < requiredCleaners(j));
+    return jobs.filter(
+      (j) => getAssignedIds(j).length < requiredCleaners(j)
+    );
   }, [jobs, uid, autoAssign]);
 
   // my jobs = I'm in assigned list
   const myJobs = useMemo(() => {
     if (!uid) return [];
-    return jobs.filter(j => getAssignedIds(j).includes(uid));
+    return jobs.filter((j) => getAssignedIds(j).includes(uid));
   }, [jobs, uid]);
 
   const getErrorMessage = (e: unknown): string =>
     typeof e === 'string'
       ? e
-      : (e && typeof e === 'object' && 'message' in e && typeof (e as { message?: string }).message === 'string')
+      : e &&
+        typeof e === 'object' &&
+        'message' in e &&
+        typeof (e as { message?: string }).message === 'string'
       ? (e as { message?: string }).message!
       : 'Unexpected error';
 
   // self-assign supporting 2 cleaners + Zapier hook
   const assignToMe = async (jobId: string) => {
     if (!uid) return alert('Not signed in');
-    if (!confirm('Assign this job to you and send you the booking details?')) return;
+    if (
+      !confirm(
+        'Assign this job to you and send you the booking details?'
+      )
+    )
+      return;
     try {
       const dref = doc(db, 'bookings', jobId);
       const snap = await getDoc(dref);
@@ -477,7 +732,9 @@ export default function Jobs() {
 
       const staffRef = doc(db, 'staff', uid);
       const staffSnap = await getDoc(staffRef);
-      const staff = staffSnap.exists() ? (staffSnap.data() as Record<string, unknown>) : {};
+      const staff = staffSnap.exists()
+        ? (staffSnap.data() as Record<string, unknown>)
+        : {};
 
       const myName =
         auth.currentUser?.displayName ||
@@ -502,50 +759,65 @@ export default function Jobs() {
           (staff['email'] as string | undefined) ||
           '';
 
-        const staffPhone =
+        const rawStaffPhone =
           (staff['phone'] as string | undefined) ||
           auth.currentUser?.phoneNumber ||
           (staff['mobile'] as string | undefined) ||
           '';
 
+        const staffPhone = toE164UK(rawStaffPhone) ?? '';
+
         const estimatedHours = Number(data.estimatedHours ?? 0) || 0;
-        const staffPay = estimatedHours ? estimatedHours * staffRate : 0;
+        const staffPay = estimatedHours
+          ? estimatedHours * staffRate
+          : 0;
 
         const postcode =
           typeof data.address === 'string'
             ? data.address
-            : (data.address?.postcode as string | undefined) || '';
+            : ((data.address?.postcode as string | undefined) || '');
 
         const time =
           data.endTime && data.endTime !== data.startTime
             ? `${data.startTime} - ${data.endTime}`
             : data.startTime || '';
 
-        const snippet = `New booking: ${data.customerName || 'Customer'} - ${postcode} on ${formatUKDate(
+        const snippet = `New booking: ${
+          data.customerName || 'Customer'
+        } - ${postcode} on ${formatUKDate(
           data.date || ''
-        )} at ${time || 'time TBC'} • Pay: ${
-          staffPay ? currency.format(staffPay) : currency.format(0)
+        )} at ${
+          time || 'time TBC'
+        } • Pay: ${
+          staffPay
+            ? currency.format(staffPay)
+            : currency.format(0)
         }`;
 
-        await fetch('https://hooks.zapier.com/hooks/catch/22652608/u85aagf/', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            trigger: 'booking_assigned',
-            jobId,
-            staffId: uid,
-            staffName: myName,
-            staffEmail,
-            staffPhone,
-            customerName: data.customerName || '',
-            postcode,
-            date: data.date || '',
-            time,
-            estimatedHours,
-            staffPay,
-            snippet,
-          }),
-        });
+        await fetch(
+          'https://hooks.zapier.com/hooks/catch/22652608/u85wg6z/',
+          {
+            method: 'POST',
+            mode: 'no-cors',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              trigger: 'booking_assigned',
+              jobId,
+              staffId: uid,
+              staffName: myName,
+              staffEmail,
+              staffPhone,
+              rawStaffPhone,
+              customerName: data.customerName || '',
+              postcode,
+              date: data.date || '',
+              time,
+              estimatedHours,
+              staffPay,
+              snippet,
+            }),
+          }
+        );
       } catch (zapErr) {
         console.error('Zapier assign webhook failed', zapErr);
       }
@@ -561,7 +833,9 @@ export default function Jobs() {
     try {
       const staffRef = doc(db, 'staff', uid);
       const staffSnap = await getDoc(staffRef);
-      const staff = staffSnap.exists() ? (staffSnap.data() as Record<string, unknown>) : {};
+      const staff = staffSnap.exists()
+        ? (staffSnap.data() as Record<string, unknown>)
+        : {};
 
       const staffName =
         auth.currentUser?.displayName ||
@@ -575,47 +849,69 @@ export default function Jobs() {
         (staff['email'] as string | undefined) ||
         '';
 
-      const staffPhone =
+      const rawStaffPhone =
         (staff['phone'] as string | undefined) ||
         auth.currentUser?.phoneNumber ||
         (staff['mobile'] as string | undefined) ||
         '';
 
+      const staffPhone = toE164UK(rawStaffPhone) ?? '';
+
       const postcode =
         typeof job.address === 'string'
           ? job.address
-          : (job.address?.postcode as string | undefined) || '';
+          : ((job.address?.postcode as string | undefined) || '');
 
       const estimatedHours = Number(job.estimatedHours ?? 0) || 0;
-      const staffPay = estimatedHours ? estimatedHours * staffRate : 0;
+      const staffPay = estimatedHours
+        ? estimatedHours * staffRate
+        : 0;
 
-      const snippet = `Booking confirmed: ${job.customerName || 'Customer'} - ${postcode} on ${formatUKDate(
+      const snippet = `Booking confirmed: ${
+        job.customerName || 'Customer'
+      } - ${postcode} on ${formatUKDate(
         job.date || ''
-      )} at ${job.displayTime || job.startTime || ''} • Pay: ${
-        staffPay ? currency.format(staffPay) : currency.format(0)
+      )} at ${
+        job.displayTime || job.startTime || ''
+      } • Pay: ${
+        staffPay
+          ? currency.format(staffPay)
+          : currency.format(0)
       }`;
 
-      await fetch('https://hooks.zapier.com/hooks/catch/22652608/u85wg6z/', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          trigger: 'booking_confirmed',
-          jobId: job.id,
-          staffId: uid,
-          staffName,
-          staffEmail,
-          staffPhone,
-          customerName: job.customerName || '',
-          postcode,
-          date: job.date || '',
-          time: job.displayTime || job.startTime || '',
-          estimatedHours,
-          staffPay,
-          snippet,
-        }),
+      await fetch(
+        'https://hooks.zapier.com/hooks/catch/22652608/u85aagf/',
+        {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            trigger: 'booking_confirmed',
+            jobId: job.id,
+            staffId: uid,
+            staffName,
+            staffEmail,
+            staffPhone,
+            customerName: job.customerName || '',
+            postcode,
+            rawStaffPhone,
+            date: job.date || '',
+            time: job.displayTime || job.startTime || '',
+            estimatedHours,
+            staffPay,
+            snippet,
+          }),
+        }
+      );
+
+      // NEW: persist confirmation on the booking doc
+      await updateDoc(doc(db, 'bookings', job.id), {
+        confirmedStaffIds: arrayUnion(uid),
       });
 
-      setConfirmedJobs(prev => prev.includes(job.id) ? prev : [...prev, job.id]);
+      setConfirmedJobs((prev) =>
+        prev.includes(job.id) ? prev : [...prev, job.id]
+      );
       alert('Booking confirmed. Thank you!');
     } catch (e) {
       console.error(e);
@@ -648,12 +944,20 @@ export default function Jobs() {
 
     const STAFF_RATE = staffRate;
 
-    const money = new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', maximumFractionDigits: 2 });
+    const money = new Intl.NumberFormat('en-GB', {
+      style: 'currency',
+      currency: 'GBP',
+      maximumFractionDigits: 2,
+    });
 
     const fmtLongDate = (ymd: string) => {
       const [yy, mm, dd] = (ymd || '').split('-').map(Number);
       const dt = new Date(yy, (mm || 1) - 1, dd || 1);
-      return dt.toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' });
+      return dt.toLocaleDateString('en-GB', {
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric',
+      });
     };
 
     const loadImage = (src: string) =>
@@ -665,7 +969,7 @@ export default function Jobs() {
         im.src = src;
       });
 
-    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    const docPdf = new jsPDF({ unit: 'pt', format: 'a4' });
     let y = M;
 
     const set = (
@@ -674,51 +978,62 @@ export default function Jobs() {
       size = BODY_SIZE,
       color = '#111'
     ) => {
-      doc.setFont(font, style);
-      doc.setFontSize(size);
-      doc.setTextColor(color);
+      docPdf.setFont(font, style);
+      docPdf.setFontSize(size);
+      docPdf.setTextColor(color);
     };
     const hr = () => {
-      doc.setDrawColor('#cfd8e3');
-      doc.line(M, y, A4_W - M, y);
+      docPdf.setDrawColor('#cfd8e3');
+      docPdf.line(M, y, A4_W - M, y);
     };
-    const split = (text: string, maxW: number) => doc.splitTextToSize(text, maxW);
+    const split = (text: string, maxW: number) =>
+      docPdf.splitTextToSize(text, maxW);
 
     const logo = await loadImage('/logo.png');
     const LOGO_H = 120;
     const logoW = (logo.width / logo.height) * LOGO_H;
     const headerCenterY = y + LOGO_H / 2;
 
-    doc.addImage(logo, 'PNG', M, y, logoW, LOGO_H);
+    docPdf.addImage(logo, 'PNG', M, y, logoW, LOGO_H);
 
     const titleX = M + logoW + 18;
     set('helvetica', 'bold', MAIN_TITLE_SIZE, BLUE);
-    doc.text('LUXEN CLEANING', titleX, headerCenterY - 8);
+    docPdf.text('LUXEN CLEANING', titleX, headerCenterY - 8);
     set('helvetica', 'normal', SUBTITLE_SIZE, '#111');
-    doc.text('Standard Home Cleaning Checklist', titleX, headerCenterY + 10);
+    docPdf.text(
+      'Standard Home Cleaning Checklist',
+      titleX,
+      headerCenterY + 10
+    );
 
     y += LOGO_H + 10;
     hr();
     y += HR_GAP;
 
     set('helvetica', 'bold', TITLE_SIZE, BLUE);
-    doc.text('Customer Details', M, y);
+    docPdf.text('Customer Details', M, y);
 
     const detailGap = 16;
     const innerW = A4_W - 2 * M;
-    const leftW = innerW * 0.30;
-    const rightW = innerW * 0.70 - detailGap;
+    const leftW = innerW * 0.3;
+    const rightW = innerW * 0.7 - detailGap;
 
     const L = M;
     const R = M + leftW + detailGap;
 
-    doc.text('Job Details', R, y);
+    docPdf.text('Job Details', R, y);
     y += TITLE_GAP;
 
-    const kvInline = (x: number, yy: number, label: string, value: string | number | undefined, width: number) => {
+    const kvInline = (
+      x: number,
+      yy: number,
+      label: string,
+      value: string | number | undefined,
+      width: number
+    ) => {
       set('helvetica', 'normal', BODY_SIZE, '#111');
       const wrapped = split(`${label}: ${value ?? '—'}`, width);
-      doc.text(wrapped, x, yy);
+      docPdf.text(wrapped, x, yy);
       const lines = Array.isArray(wrapped) ? wrapped.length : 1;
       return yy + Math.max(LINE_STEP, LINE_STEP * lines);
     };
@@ -727,7 +1042,13 @@ export default function Jobs() {
     const addr =
       typeof job.address === 'string'
         ? job.address
-        : [job.address?.line1, job.address?.line2, job.address?.town, job.address?.county, job.address?.postcode]
+        : [
+            job.address?.line1,
+            job.address?.line2,
+            job.address?.town,
+            job.address?.county,
+            job.address?.postcode,
+          ]
             .filter(Boolean)
             .join(', ');
     let yL = y;
@@ -735,49 +1056,141 @@ export default function Jobs() {
     yL = kvInline(L, yL, 'Address', addr || '—', leftW);
     yL = kvInline(L, yL, 'Phone', job.customerPhone || '—', leftW);
 
-    const showTime = job.displayTime || job.startTime || '—';
+    const showTime =
+      job.displayTime || job.startTime || '—';
     const hours = Number(job.estimatedHours ?? 0) || 0;
     const pay = hours > 0 ? money.format(hours * STAFF_RATE) : '—';
-    const cleaners = getAssignedNames(job).join(', ') || '—';
+    const cleaners =
+      getAssignedNames(job).join(', ') || '—';
 
-    const roomsLine = [
-      `${Number(job.bedrooms ?? 0)} bed`,
-      `${Number(job.bathrooms ?? 0)} bath`,
-      `${Number(job.livingRooms ?? 0)} living`,
-      `${Number(job.kitchens ?? 0)} kitchen`,
-    ].join(' · ');
+    // NEW: nicer rooms line using roomSummaries when present
+    let roomsLine: string;
+    if (Array.isArray(job.roomSummaries) && job.roomSummaries.length > 0) {
+      const segments = job.roomSummaries
+        .map((r) => {
+          const label =
+            r.label || labelRoomType(r.typeId);
+          const sizes = Array.isArray(r.sizes) ? r.sizes : [];
+          const sizeCounts: Record<string, number> = {};
+          for (const sid of sizes) {
+            const key = (sid || '').toLowerCase();
+            if (!key) continue;
+            sizeCounts[key] = (sizeCounts[key] || 0) + 1;
+          }
+          const totalRooms =
+            Number(r.count ?? sizes.length ?? 0) || 0;
+
+          if (!totalRooms) return null;
+
+          if (Object.keys(sizeCounts).length > 0) {
+            const sizeText = Object.entries(sizeCounts)
+              .map(([key, count]) => {
+                const sizeName =
+                  SIZE_LABELS[key] || key;
+                return `${count} ${sizeName}`;
+              })
+              .join(', ');
+            return `${label}: ${totalRooms} room${
+              totalRooms > 1 ? 's' : ''
+            } (${sizeText})`;
+          }
+
+          return `${label}: ${totalRooms} room${
+            totalRooms > 1 ? 's' : ''
+          }`;
+        })
+        .filter(Boolean) as string[];
+
+      roomsLine = segments.length
+        ? segments.join(' · ')
+        : 'Not set';
+    } else {
+      const b = parseCount(job.bedrooms);
+      const baths = parseCount(job.bathrooms);
+      const liv = parseCount(job.livingRooms);
+      const k = parseCount(job.kitchens);
+
+      const parts: string[] = [];
+      if (b) parts.push(`${b} bed${b > 1 ? 's' : ''}`);
+      if (baths)
+        parts.push(
+          `${baths} bath${baths > 1 ? 's' : ''}`
+        );
+      if (liv) parts.push(`${liv} living`);
+      if (k)
+        parts.push(
+          `${k} kitchen${k > 1 ? 's' : ''}`
+        );
+
+      roomsLine = parts.length ? parts.join(' · ') : 'Not set';
+    }
 
     let yR = y;
-    yR = kvInline(R, yR, 'Date', job.date ? fmtLongDate(job.date) : '—', rightW);
+    yR = kvInline(
+      R,
+      yR,
+      'Date',
+      job.date ? fmtLongDate(job.date) : '—',
+      rightW
+    );
     yR = kvInline(R, yR, 'Time', showTime, rightW);
-    yR = kvInline(R, yR, 'Service', job.serviceType || 'Cleaning Service', rightW);
+    yR = kvInline(
+      R,
+      yR,
+      'Service',
+      job.serviceType || 'Cleaning Service',
+      rightW
+    );
     yR = kvInline(R, yR, 'Rooms', roomsLine, rightW);
     yR = kvInline(R, yR, 'Cleanliness', job.cleanliness || '—', rightW);
-    yR = kvInline(R, yR, 'Estimated Hours', hours ? String(hours) : '—', rightW);
-    yR = kvInline(R, yR, 'Assigned Cleaners', cleaners, rightW);
+    yR = kvInline(
+      R,
+      yR,
+      'Estimated Hours',
+      hours ? String(hours) : '—',
+      rightW
+    );
+    yR = kvInline(
+      R,
+      yR,
+      'Assigned Cleaners',
+      cleaners,
+      rightW
+    );
     yR = kvInline(R, yR, 'Your Pay', pay, rightW);
 
     y = Math.max(yL, yR) + 8;
     hr();
     y += HR_GAP;
 
-    const checkboxLine = (x: number, yy: number, text: string, width: number) => {
+    const checkboxLine = (
+      x: number,
+      yy: number,
+      text: string,
+      width: number
+    ) => {
       const rectY = yy - BOX + BODY_SIZE * 0.48;
-      doc.setDrawColor(0);
-      doc.setFillColor(255, 255, 255);
-      doc.rect(x, rectY, BOX, BOX, 'FD');
+      docPdf.setDrawColor(0);
+      docPdf.setFillColor(255, 255, 255);
+      docPdf.rect(x, rectY, BOX, BOX, 'FD');
 
       set('helvetica', 'normal', BODY_SIZE, '#111');
       const wrapped = split(text, width - (BOX + 12));
-      doc.text(wrapped, x + BOX + 7, yy);
+      docPdf.text(wrapped, x + BOX + 7, yy);
 
       const lines = Array.isArray(wrapped) ? wrapped.length : 1;
       return yy + Math.max(LINE_STEP, LINE_STEP * lines);
     };
 
-    const section = (title: string, items: string[], x: number, yy: number, width: number) => {
+    const section = (
+      title: string,
+      items: string[],
+      x: number,
+      yy: number,
+      width: number
+    ) => {
       set('helvetica', 'bold', TITLE_SIZE, BLUE);
-      doc.text(title, x, yy);
+      docPdf.text(title, x, yy);
       yy += TITLE_GAP;
       let cur = yy;
       for (const it of items) cur = checkboxLine(x, cur, it, width);
@@ -831,11 +1244,11 @@ export default function Jobs() {
     ];
 
     let yL1 = section('Entry & Hallway', entry_items, M, y, colW2);
-    let yR1 = section('Kitchen',        kitchen_items, M + colW2 + colGap2, y, colW2);
+    let yR1 = section('Kitchen', kitchen_items, M + colW2 + colGap2, y, colW2);
     y = Math.max(yL1, yR1) + ROW_GAP;
 
     let yL2 = section('Bathrooms', bathroom_items, M, y, colW2);
-    let yR2 = section('Bedrooms',  bedroom_items,  M + colW2 + colGap2, y, colW2);
+    let yR2 = section('Bedrooms', bedroom_items, M + colW2 + colGap2, y, colW2);
     y = Math.max(yL2, yR2) + ROW_GAP;
 
     let yL3 = section('Living Areas', living_items, M, y, colW2);
@@ -844,17 +1257,26 @@ export default function Jobs() {
 
     const footerY = Math.min(A4_H - 22, y + 20);
     set('helvetica', 'italic', 9, '#555');
-    doc.text('Thank you for choosing Luxen Cleaning.', M, footerY);
+    docPdf.text('Thank you for choosing Luxen Cleaning.', M, footerY);
 
-    const pc = typeof job.address === 'string' ? '' : (job.address?.postcode ?? '');
-    doc.save(`${job.customerName ?? 'Customer'} (${pc}) Checklist.pdf`);
+    const pc =
+      typeof job.address === 'string'
+        ? ''
+        : job.address?.postcode ?? '';
+    docPdf.save(
+      `${job.customerName ?? 'Customer'} (${pc}) Checklist.pdf`
+    );
   }
 
   const inputCls =
     'w-full h-11 px-3 rounded-lg border border-gray-300 bg-white text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#0071bc]/30 focus:border-[#0071bc]';
 
-  const setDay = (day: DayName, field: keyof DayAvail, value: DayAvail[typeof field]) => {
-    setAvailability(prev => {
+  const setDay = (
+    day: DayName,
+    field: keyof DayAvail,
+    value: DayAvail[typeof field]
+  ) => {
+    setAvailability((prev) => {
       const cur = prev[day];
       if (field === 'available') {
         const makeOn = Boolean(value);
@@ -862,8 +1284,8 @@ export default function Jobs() {
           ...prev,
           [day]: {
             available: makeOn,
-            from: makeOn ? (cur.from || '07:00') : '',
-            to:   makeOn ? (cur.to   || '20:00') : '',
+            from: makeOn ? cur.from || '07:00' : '',
+            to: makeOn ? cur.to || '20:00' : '',
           },
         };
       }
@@ -871,8 +1293,16 @@ export default function Jobs() {
     });
   };
 
-  const toggleIn = (list: string[], value: string, setter: (v: string[]) => void) => {
-    setter(list.includes(value) ? list.filter(v => v !== value) : [...list, value]);
+  const toggleIn = (
+    list: string[],
+    value: string,
+    setter: (v: string[]) => void
+  ) => {
+    setter(
+      list.includes(value)
+        ? list.filter((v) => v !== value)
+        : [...list, value]
+    );
   };
 
   const payText = (j: Job) => {
@@ -882,14 +1312,14 @@ export default function Jobs() {
 
   const twoCleanerLine = (j: Job): string | null => {
     if (!j.twoCleaners) return null;
-    console.log(j);
     const ids = getAssignedIds(j);
     const names = getAssignedNames(j);
     if (ids.length >= 2) {
       if (!uid) return 'Two-cleaner job';
-      const myIdx = ids.findIndex(x => x === uid);
+      const myIdx = ids.findIndex((x) => x === uid);
       const otherIdx = myIdx === 0 ? 1 : 0;
-      const other = names[otherIdx] || ids[otherIdx] || 'Second cleaner';
+      const other =
+        names[otherIdx] || ids[otherIdx] || 'Second cleaner';
       return `Also assigned: ${other}`;
     }
     return 'Awaiting second cleaner';
@@ -897,7 +1327,9 @@ export default function Jobs() {
 
   // small badge
   const Tag = ({ children }: { children: React.ReactNode }) => (
-    <span className="px-2 py-1 rounded bg-gray-50 border text-xs text-gray-700">{children}</span>
+    <span className="px-2 py-1 rounded bg-gray-50 border text-xs text-gray-700">
+      {children}
+    </span>
   );
 
   // hours badge content
@@ -906,15 +1338,18 @@ export default function Jobs() {
     return `Est: ${h || '—'} h`;
   };
 
- 
   return (
     <div className="space-y-8">
       {/* PROFILE GATE (unchanged) */}
       {checkedProfile && needsProfile && (
         <section className="space-y-4">
           <div>
-            <h2 className="text-xl font-bold text-[#0071bc]">Complete your profile</h2>
-            <p className="text-sm text-gray-800">You need to complete your profile to receive jobs.</p>
+            <h2 className="text-xl font-bold text-[#0071bc]">
+              Complete your profile
+            </h2>
+            <p className="text-sm text-gray-800">
+              You need to complete your profile to receive jobs.
+            </p>
           </div>
 
           <div className="max-w-3xl rounded-2xl border bg-white shadow p-4 md:p-6">
@@ -925,13 +1360,17 @@ export default function Jobs() {
             )}
 
             <div className="flex items-center justify-between mb-3">
-              <div className="text-sm font-medium text-gray-900">Step <span>{step + 1}</span> / 14</div>
+              <div className="text-sm font-medium text-gray-900">
+                Step <span>{step + 1}</span> / 14
+              </div>
               <div className="flex items-center gap-2">
                 <button
                   onClick={back}
                   disabled={step === 0}
                   className={`px-3 py-1.5 rounded-md border cursor-pointer ${
-                    step === 0 ? 'opacity-50 cursor-not-allowed' : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+                    step === 0
+                      ? 'opacity-50 cursor-not-allowed'
+                      : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
                   }`}
                 >
                   Back
@@ -942,7 +1381,9 @@ export default function Jobs() {
                     onClick={next}
                     disabled={!isValid}
                     className={`px-3 py-1.5 rounded-md text-white font-medium cursor-pointer ${
-                      isValid ? 'bg-[#0071bc] hover:opacity-95' : 'bg-[#0071bc]/50 cursor-not-allowed'
+                      isValid
+                        ? 'bg-[#0071bc] hover:opacity-95'
+                        : 'bg-[#0071bc]/50 cursor-not-allowed'
                     }`}
                   >
                     Next
@@ -952,7 +1393,9 @@ export default function Jobs() {
                     onClick={save}
                     disabled={!isValid || saving}
                     className={`px-3 py-1.5 rounded-md text-white font-medium cursor-pointer ${
-                      isValid && !saving ? 'bg-[#0071bc] hover:opacity-95' : 'bg-[#0071bc]/50 cursor-not-allowed'
+                      isValid && !saving
+                        ? 'bg-[#0071bc] hover:opacity-95'
+                        : 'bg-[#0071bc]/50 cursor-not-allowed'
                     }`}
                   >
                     {saving ? 'Saving…' : 'Save Profile'}
@@ -965,49 +1408,104 @@ export default function Jobs() {
             <div className="space-y-2 relative overflow-hidden">
               <div
                 key={step}
-                className={`step-panel ${stepDirection === 'forward' ? 'step-forward' : 'step-backward'}`}
+                className={`step-panel ${
+                  stepDirection === 'forward'
+                    ? 'step-forward'
+                    : 'step-backward'
+                }`}
               >
                 {step === 0 && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">What is your home postcode?</div>
-                    <p className="text-sm text-gray-800 mb-2">We use this to match you with nearby jobs.</p>
-                    <input className={inputCls} placeholder="e.g., M1 2AB" value={homePostcode} onChange={(e) => setHomePostcode(e.target.value)} />
+                    <div className="text-base font-semibold text-gray-900 mb-1">
+                      What is your home postcode?
+                    </div>
+                    <p className="text-sm text-gray-800 mb-2">
+                      We use this to match you with nearby jobs.
+                    </p>
+                    <input
+                      className={inputCls}
+                      placeholder="e.g., M1 2AB"
+                      value={homePostcode}
+                      onChange={(e) =>
+                        setHomePostcode(e.target.value)
+                      }
+                    />
                   </div>
                 )}
 
                 {step === 1 && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">How far can you travel (miles)?</div>
-                    <p className="text-sm text-gray-800 mb-3">Adjust the distance and see the area you can cover.</p>
+                    <div className="text-base font-semibold text-gray-900 mb-1">
+                      How far can you travel (miles)?
+                    </div>
+                    <p className="text-sm text-gray-800 mb-3">
+                      Adjust the distance and see the area you can cover.
+                    </p>
 
                     <div className="flex items-center gap-3 mb-3">
-                      <button type="button" className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-gray-900 text-white text-lg font-bold hover:opacity-90 cursor-pointer" onClick={() => bumpRadius(-1)} aria-label="Decrease miles">−</button>
+                      <button
+                        type="button"
+                        className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-gray-900 text-white text-lg font-bold hover:opacity-90 cursor-pointer"
+                        onClick={() => bumpRadius(-1)}
+                        aria-label="Decrease miles"
+                      >
+                        −
+                      </button>
                       <div className="text-sm font-semibold text-gray-900 min-w-[90px] text-center">
-                        {radiusMiles} mile{radiusMiles === 1 ? '' : 's'}
+                        {radiusMiles} mile
+                        {radiusMiles === 1 ? '' : 's'}
                       </div>
-                      <button type="button" className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-[#0071bc] text-white text-lg font-bold hover:opacity-95 cursor-pointer" onClick={() => bumpRadius(1)} aria-label="Increase miles">+</button>
+                      <button
+                        type="button"
+                        className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-[#0071bc] text-white text-lg font-bold hover:opacity-95 cursor-pointer"
+                        onClick={() => bumpRadius(1)}
+                        aria-label="Increase miles"
+                      >
+                        +
+                      </button>
                     </div>
 
                     <div className="h-64 w-full overflow-hidden rounded-xl border border-gray-200">
                       {!mapCenter && (
                         <div className="h-full w-full flex items-center justify-center text-sm text-gray-800">
-                          {geoLoading ? 'Locating postcode…' : 'Enter a valid UK postcode first'}
+                          {geoLoading
+                            ? 'Locating postcode…'
+                            : 'Enter a valid UK postcode first'}
                         </div>
                       )}
                       {mapCenter && (
                         <MapContainer
                           center={mapCenter}
                           zoom={9}
-                          whenCreated={(m) => { mapRef.current = m as unknown as LeafletMapLike; }}
+                          whenCreated={(m) => {
+                            mapRef.current =
+                              m as unknown as LeafletMapLike;
+                          }}
                           style={{ height: '100%', width: '100%' }}
                           scrollWheelZoom
                         >
                           <TileLayer
-                            attribution='&copy; OpenStreetMap contributors &copy; CARTO'
+                            attribution="&copy; OpenStreetMap contributors &copy; CARTO"
                             url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
                           />
-                          <Circle center={mapCenter} radius={20} pathOptions={{ color: '#111827', fillColor: '#111827', fillOpacity: 0.9 }} />
-                          <Circle center={mapCenter} radius={milesToMeters(radiusMiles)} pathOptions={{ color: '#0ea5e9', fillColor: '#38bdf8', fillOpacity: 0.12 }} />
+                          <Circle
+                            center={mapCenter}
+                            radius={20}
+                            pathOptions={{
+                              color: '#111827',
+                              fillColor: '#111827',
+                              fillOpacity: 0.9,
+                            }}
+                          />
+                          <Circle
+                            center={mapCenter}
+                            radius={milesToMeters(radiusMiles)}
+                            pathOptions={{
+                              color: '#0ea5e9',
+                              fillColor: '#38bdf8',
+                              fillOpacity: 0.12,
+                            }}
+                          />
                         </MapContainer>
                       )}
                     </div>
@@ -1016,61 +1514,127 @@ export default function Jobs() {
 
                 {step === 2 && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">Notice time before jobs (hours)</div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">
+                      Notice time before jobs (hours)
+                    </div>
                     <input
                       className={inputCls}
                       type="number"
                       min={0}
                       max={168}
                       placeholder="Enter hours"
-                      value={Number.isFinite(minNoticeHours) ? String(minNoticeHours) : ''}
-                      onChange={(e) => setMinNoticeHours(e.target.value === '' ? (NaN as unknown as number) : Number(e.target.value))}
+                      value={
+                        Number.isFinite(minNoticeHours)
+                          ? String(minNoticeHours)
+                          : ''
+                      }
+                      onChange={(e) =>
+                        setMinNoticeHours(
+                          e.target.value === ''
+                            ? (NaN as unknown as number)
+                            : Number(e.target.value)
+                        )
+                      }
                     />
                   </div>
                 )}
 
                 {step === 3 && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">Gap needed between jobs (minutes)</div>
-                    <select className={inputCls} value={String(travelBufferMins)} onChange={(e) => setTravelBufferMins(Number(e.target.value))}>
-                      {[0,15,30,45,60,90].map(n => <option key={n} value={n}>{n}</option>)}
+                    <div className="text-base font-semibold text-gray-900 mb-1">
+                      Gap needed between jobs (minutes)
+                    </div>
+                    <select
+                      className={inputCls}
+                      value={String(travelBufferMins)}
+                      onChange={(e) =>
+                        setTravelBufferMins(Number(e.target.value))
+                      }
+                    >
+                      {[0, 15, 30, 45, 60, 90].map((n) => (
+                        <option key={n} value={n}>
+                          {n}
+                        </option>
+                      ))}
                     </select>
                   </div>
                 )}
 
                 {step === 4 && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-2">Weekly availability</div>
+                    <div className="text-base font-semibold text-gray-900 mb-2">
+                      Weekly availability
+                    </div>
                     <div className="space-y-2 max-h-72 overflow-auto pr-1">
-                      {(Object.keys(availability) as DayName[]).map((day) => (
-                        <div key={day} className="flex flex-wrap items-center gap-2 border rounded-lg p-3">
-                          <div className="w-28 font-medium text-gray-900">{day}</div>
-                          <label className="inline-flex items-center gap-2 text-gray-900">
-                            <input type="checkbox" className="h-4 w-4" checked={availability[day].available} onChange={(e) => setDay(day, 'available', e.target.checked)} />
-                            Available
-                          </label>
-                          {availability[day].available && (
-                            <div className="flex flex-wrap items-center gap-2 ml-auto">
-                              <input aria-label={`${day} start time`} type="time" className="h-10 px-2 rounded border border-gray-300 w-28 text-gray-900" value={availability[day].from} onChange={(e) => setDay(day, 'from', e.target.value)} />
-                              <span className="text-sm text-gray-900">–</span>
-                              <input aria-label={`${day} end time`} type="time" className="h-10 px-2 rounded border border-gray-300 w-28 text-gray-900" value={availability[day].to} onChange={(e) => setDay(day, 'to', e.target.value)} />
+                      {(Object.keys(availability) as DayName[]).map(
+                        (day) => (
+                          <div
+                            key={day}
+                            className="flex flex-wrap items-center gap-2 border rounded-lg p-3"
+                          >
+                            <div className="w-28 font-medium text-gray-900">
+                              {day}
                             </div>
-                          )}
-                        </div>
-                      ))}
+                            <label className="inline-flex items-center gap-2 text-gray-900">
+                              <input
+                                type="checkbox"
+                                className="h-4 w-4"
+                                checked={availability[day].available}
+                                onChange={(e) =>
+                                  setDay(
+                                    day,
+                                    'available',
+                                    e.target.checked
+                                  )
+                                }
+                              />
+                              Available
+                            </label>
+                            {availability[day].available && (
+                              <div className="flex flex-wrap items-center gap-2 ml-auto">
+                                <input
+                                  aria-label={`${day} start time`}
+                                  type="time"
+                                  className="h-10 px-2 rounded border border-gray-300 w-28 text-gray-900"
+                                  value={availability[day].from}
+                                  onChange={(e) =>
+                                    setDay(day, 'from', e.target.value)
+                                  }
+                                />
+                                <span className="text-sm text-gray-900">
+                                  –
+                                </span>
+                                <input
+                                  aria-label={`${day} end time`}
+                                  type="time"
+                                  className="h-10 px-2 rounded border border-gray-300 w-28 text-gray-900"
+                                  value={availability[day].to}
+                                  onChange={(e) =>
+                                    setDay(day, 'to', e.target.value)
+                                  }
+                                />
+                              </div>
+                            )}
+                          </div>
+                        )
+                      )}
                     </div>
                   </div>
                 )}
 
                 {step === 5 && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">Do you have a car?</div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">
+                      Do you have a car?
+                    </div>
                     <div className="flex gap-2">
                       <button
                         type="button"
                         onClick={() => setHasCar(false)}
                         className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          hasCar === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                          hasCar === false
+                            ? 'border-[#0071bc] text-[#0071bc]'
+                            : 'border-gray-300 text-gray-800'
                         }`}
                       >
                         No
@@ -1079,7 +1643,9 @@ export default function Jobs() {
                         type="button"
                         onClick={() => setHasCar(true)}
                         className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          hasCar === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                          hasCar === true
+                            ? 'border-[#0071bc] text-[#0071bc]'
+                            : 'border-gray-300 text-gray-800'
                         }`}
                       >
                         Yes
@@ -1090,13 +1656,17 @@ export default function Jobs() {
 
                 {step === 6 && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">Do you have your own supplies?</div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">
+                      Do you have your own supplies?
+                    </div>
                     <div className="flex gap-2">
                       <button
                         type="button"
                         onClick={() => setBringsSupplies(false)}
                         className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          bringsSupplies === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                          bringsSupplies === false
+                            ? 'border-[#0071bc] text-[#0071bc]'
+                            : 'border-gray-300 text-gray-800'
                         }`}
                       >
                         No
@@ -1105,7 +1675,9 @@ export default function Jobs() {
                         type="button"
                         onClick={() => setBringsSupplies(true)}
                         className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          bringsSupplies === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                          bringsSupplies === true
+                            ? 'border-[#0071bc] text-[#0071bc]'
+                            : 'border-gray-300 text-gray-800'
                         }`}
                       >
                         Yes
@@ -1116,17 +1688,19 @@ export default function Jobs() {
 
                 {step === 7 && bringsSupplies && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">Which equipment can you bring?</div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">
+                      Which equipment can you bring?
+                    </div>
                     <div className="flex flex-wrap gap-2">
                       {[
-                        ['vacuum','Vacuum cleaner'],
-                        ['mopBucket','Mop & bucket'],
-                        ['duster','Duster'],
-                        ['broomDustpan','Broom & dustpan'],
-                        ['microfibre','Microfibre cloths'],
-                        ['spotCleaner','Carpet spot cleaner (handheld)'],
-                        ['none','None of the above'],
-                      ].map(([key,label]) => (
+                        ['vacuum', 'Vacuum cleaner'],
+                        ['mopBucket', 'Mop & bucket'],
+                        ['duster', 'Duster'],
+                        ['broomDustpan', 'Broom & dustpan'],
+                        ['microfibre', 'Microfibre cloths'],
+                        ['spotCleaner', 'Carpet spot cleaner (handheld)'],
+                        ['none', 'None of the above'],
+                      ].map(([key, label]) => (
                         <button
                           key={key}
                           type="button"
@@ -1134,16 +1708,22 @@ export default function Jobs() {
                             if (key === 'none') {
                               setEquipment(['none']);
                             } else {
-                              const next = equipment.includes('none') ? [] : [...equipment];
+                              const next = equipment.includes('none')
+                                ? []
+                                : [...equipment];
                               if (next.includes(key)) {
-                                setEquipment(next.filter(k => k !== key));
+                                setEquipment(
+                                  next.filter((k) => k !== key)
+                                );
                               } else {
                                 setEquipment([...next, key]);
                               }
                             }
                           }}
                           className={`px-3 py-1.5 rounded border cursor-pointer ${
-                            equipment.includes(key) ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                            equipment.includes(key)
+                              ? 'border-[#0071bc] text-[#0071bc]'
+                              : 'border-gray-300 text-gray-800'
                           }`}
                         >
                           {label}
@@ -1155,21 +1735,30 @@ export default function Jobs() {
 
                 {step === 7 && !bringsSupplies && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">Equipment</div>
-                    <p className="text-sm text-gray-700">You indicated you don't bring your own supplies, so we'll skip the equipment question.</p>
+                    <div className="text-base font-semibold text-gray-900 mb-1">
+                      Equipment
+                    </div>
+                    <p className="text-sm text-gray-700">
+                      You indicated you don't bring your own supplies, so
+                      we'll skip the equipment question.
+                    </p>
                   </div>
                 )}
 
                 {step === 8 && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">Are you allergic to any animals?</div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">
+                      Are you allergic to any animals?
+                    </div>
                     <div className="space-y-3">
                       <div className="flex gap-2">
                         <button
                           type="button"
                           onClick={() => setPets([])}
                           className={`px-3 py-1.5 rounded border cursor-pointer ${
-                            pets.length === 0 ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                            pets.length === 0
+                              ? 'border-[#0071bc] text-[#0071bc]'
+                              : 'border-gray-300 text-gray-800'
                           }`}
                         >
                           No
@@ -1180,46 +1769,60 @@ export default function Jobs() {
                             if (pets.length === 0) setPets(['dogs']);
                           }}
                           className={`px-3 py-1.5 rounded border cursor-pointer ${
-                            pets.length > 0 ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                            pets.length > 0
+                              ? 'border-[#0071bc] text-[#0071bc]'
+                              : 'border-gray-300 text-gray-800'
                           }`}
                         >
                           Yes
                         </button>
                       </div>
-                      
+
                       {pets.length > 0 && (
                         <div>
-                          <p className="text-sm text-gray-700 mb-2">Select all animals you're allergic to:</p>
+                          <p className="text-sm text-gray-700 mb-2">
+                            Select all animals you're allergic to:
+                          </p>
                           <div className="flex flex-wrap gap-2">
                             {[
-                              ['dogs','Dogs'],
-                              ['cats','Cats'],
-                              ['birds','Birds'],
-                              ['rabbits','Rabbits'],
-                              ['rodents','Rodents (hamsters, guinea pigs, etc.)'],
-                              ['reptiles','Reptiles'],
-                              ['horses','Horses'],
-                            ].map(([key,label]) => (
+                              ['dogs', 'Dogs'],
+                              ['cats', 'Cats'],
+                              ['birds', 'Birds'],
+                              ['rabbits', 'Rabbits'],
+                              ['rodents', 'Rodents (hamsters, guinea pigs, etc.)'],
+                              ['reptiles', 'Reptiles'],
+                              ['horses', 'Horses'],
+                            ].map(([key, label]) => (
                               <button
                                 key={key}
                                 type="button"
                                 onClick={() => {
                                   if (pets.includes(key)) {
-                                    const remaining = pets.filter(p => p !== key);
-                                    setPets(remaining.length > 0 ? remaining : [key]);
+                                    const remaining = pets.filter(
+                                      (p) => p !== key
+                                    );
+                                    setPets(
+                                      remaining.length > 0
+                                        ? remaining
+                                        : [key]
+                                    );
                                   } else {
                                     setPets([...pets, key]);
                                   }
                                 }}
                                 className={`px-3 py-1.5 rounded border cursor-pointer ${
-                                  pets.includes(key) ? 'border-[#0071bc] bg-[#0071bc] text-white' : 'border-gray-300 text-gray-800 hover:border-gray-400'
+                                  pets.includes(key)
+                                    ? 'border-[#0071bc] bg-[#0071bc] text-white'
+                                    : 'border-gray-300 text-gray-800 hover:border-gray-400'
                                 }`}
                               >
                                 {label}
                               </button>
                             ))}
                           </div>
-                          <p className="text-xs text-gray-600 mt-2">Click to select/deselect. You can choose multiple.</p>
+                          <p className="text-xs text-gray-600 mt-2">
+                            Click to select/deselect. You can choose multiple.
+                          </p>
                         </div>
                       )}
                     </div>
@@ -1228,23 +1831,29 @@ export default function Jobs() {
 
                 {step === 9 && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">Services you can do</div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">
+                      Services you can do
+                    </div>
                     <div className="flex flex-wrap gap-2">
                       {[
-                        ['standard','Standard clean'],
-                        ['deep','Deep clean'],
-                        ['eot','End of tenancy / Move-out'],
-                        ['oven','Oven clean'],
-                        ['fridge','Fridge clean'],
-                        ['laundry','Laundry / Ironing'],
-                        ['spotClean','Carpet / Upholstery spot clean'],
-                      ].map(([key,label]) => (
+                        ['standard', 'Standard clean'],
+                        ['deep', 'Deep clean'],
+                        ['eot', 'End of tenancy / Move-out'],
+                        ['oven', 'Oven clean'],
+                        ['fridge', 'Fridge clean'],
+                        ['laundry', 'Laundry / Ironing'],
+                        ['spotClean', 'Carpet / Upholstery spot clean'],
+                      ].map(([key, label]) => (
                         <button
                           key={key}
                           type="button"
-                          onClick={()=>toggleIn(services, key, setServices)}
+                          onClick={() =>
+                            toggleIn(services, key, setServices)
+                          }
                           className={`px-3 py-1.5 rounded border cursor-pointer ${
-                            services.includes(key) ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                            services.includes(key)
+                              ? 'border-[#0071bc] text-[#0071bc]'
+                              : 'border-gray-300 text-gray-800'
                           }`}
                         >
                           {label}
@@ -1256,13 +1865,17 @@ export default function Jobs() {
 
                 {step === 10 && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">Okay with team jobs?</div>
+                    <div className="text-base font-semibold text-gray-900 mb-1">
+                      Okay with team jobs?
+                    </div>
                     <div className="flex gap-2">
                       <button
                         type="button"
                         onClick={() => setTeamJobs(false)}
                         className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          teamJobs === false ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                          teamJobs === false
+                            ? 'border-[#0071bc] text-[#0071bc]'
+                            : 'border-gray-300 text-gray-800'
                         }`}
                       >
                         No
@@ -1271,7 +1884,9 @@ export default function Jobs() {
                         type="button"
                         onClick={() => setTeamJobs(true)}
                         className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          teamJobs === true ? 'border-[#0071bc] text-[#0071bc]' : 'border-gray-300 text-gray-800'
+                          teamJobs === true
+                            ? 'border-[#0071bc] text-[#0071bc]'
+                            : 'border-gray-300 text-gray-800'
                         }`}
                       >
                         Yes
@@ -1282,10 +1897,22 @@ export default function Jobs() {
 
                 {step === 11 && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">Right to work in the UK</div>
-                    <p className="text-sm text-gray-800 mb-2">Confirm you're legally allowed to work in the UK. You may be asked to provide proof.</p>
+                    <div className="text-base font-semibold text-gray-900 mb-1">
+                      Right to work in the UK
+                    </div>
+                    <p className="text-sm text-gray-800 mb-2">
+                      Confirm you're legally allowed to work in the UK.
+                      You may be asked to provide proof.
+                    </p>
                     <label className="inline-flex items-center gap-2 text-gray-900">
-                      <input type="checkbox" className="h-4 w-4" checked={rightToWorkUk} onChange={(e)=>setRightToWorkUk(e.target.checked)} />
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4"
+                        checked={rightToWorkUk}
+                        onChange={(e) =>
+                          setRightToWorkUk(e.target.checked)
+                        }
+                      />
                       I confirm I have the right to work in the UK
                     </label>
                   </div>
@@ -1293,46 +1920,69 @@ export default function Jobs() {
 
                 {step === 12 && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">Date of birth</div>
-                    <input className={inputCls} type="date" value={dateOfBirth} onChange={(e)=>setDateOfBirth(e.target.value)} />
+                    <div className="text-base font-semibold text-gray-900 mb-1">
+                      Date of birth
+                    </div>
+                    <input
+                      className={inputCls}
+                      type="date"
+                      value={dateOfBirth}
+                      onChange={(e) =>
+                        setDateOfBirth(e.target.value)
+                      }
+                    />
                   </div>
                 )}
 
                 {step === 13 && (
                   <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">Bank details</div>
-                    <p className="text-sm text-gray-800 mb-2">We use these details to pay you for completed jobs.</p>
+                    <div className="text-base font-semibold text-gray-900 mb-1">
+                      Bank details
+                    </div>
+                    <p className="text-sm text-gray-800 mb-2">
+                      We use these details to pay you for completed jobs.
+                    </p>
                     <div className="space-y-2">
                       <input
                         className={inputCls}
                         placeholder="Account holder name"
                         value={bankAccountName}
-                        onChange={(e) => setBankAccountName(e.target.value)}
+                        onChange={(e) =>
+                          setBankAccountName(e.target.value)
+                        }
                       />
                       <input
                         className={inputCls}
                         placeholder="Bank name"
                         value={bankName}
-                        onChange={(e) => setBankName(e.target.value)}
+                        onChange={(e) =>
+                          setBankName(e.target.value)
+                        }
                       />
                       <input
                         className={inputCls}
                         placeholder="Sort code"
                         value={bankSortCode}
-                        onChange={(e) => setBankSortCode(e.target.value)}
+                        onChange={(e) =>
+                          setBankSortCode(e.target.value)
+                        }
                       />
                       <input
                         className={inputCls}
                         placeholder="Account number"
                         value={bankAccountNumber}
-                        onChange={(e) => setBankAccountNumber(e.target.value)}
+                        onChange={(e) =>
+                          setBankAccountNumber(e.target.value)
+                        }
                       />
                     </div>
                   </div>
                 )}
               </div>
 
-              {stepError && <p className="text-sm text-red-600">{stepError}</p>}
+              {stepError && (
+                <p className="text-sm text-red-600">{stepError}</p>
+              )}
             </div>
           </div>
         </section>
@@ -1340,15 +1990,23 @@ export default function Jobs() {
 
       {/* AVAILABLE JOBS */}
       <section>
-        <h2 className="text-xl font-semibold mb-4 text-gray-800">Available Jobs</h2>
+        <h2 className="text-xl font-semibold mb-4 text-gray-800">
+          Available Jobs
+        </h2>
         <div className="space-y-4">
           {visibleUnassignedJobs.length === 0 ? (
             <p className="text-gray-500">
-              {autoAssign ? 'No jobs waiting for assignment.' : 'Auto-assign is OFF.'}
+              {autoAssign
+                ? 'No jobs waiting for assignment.'
+                : 'Auto-assign is OFF.'}
             </p>
           ) : (
             visibleUnassignedJobs.map((job) => {
-              const teamNote = twoCleanerLine(job) || (job.twoCleaners ? 'Team job — needs 2 cleaners' : null);
+              const teamNote =
+                twoCleanerLine(job) ||
+                (job.twoCleaners
+                  ? 'Team job — needs 2 cleaners'
+                  : null);
               return (
                 <article
                   key={job.id}
@@ -1358,30 +2016,26 @@ export default function Jobs() {
                     {/* LEFT content (flex-1 keeps width as content grows) */}
                     <div className="flex-1 space-y-3">
                       <div>
-                        <h3 className="text-base font-semibold text-gray-900">{job.customerName || 'Customer'}</h3>
-                        <div className="text-sm text-gray-600 mt-1">{job.displayAddress}</div>
+                        <h3 className="text-base font-semibold text-gray-900">
+                          {job.customerName || 'Customer'}
+                        </h3>
+                        <div className="text-sm text-gray-600 mt-1">
+                          {job.displayAddress}
+                        </div>
                         {job.customerPhone && (
-                          <div className="text-sm text-gray-700 mt-1">{job.customerPhone}</div>
+                          <div className="text-sm text-gray-700 mt-1">
+                            {job.customerPhone}
+                          </div>
                         )}
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
                         <span className="inline-flex items-center gap-2 px-2 py-1 rounded border border-gray-200">
-                          <strong className="text-gray-800">{formatUKDate(job.date)}</strong>
+                          <strong className="text-gray-800">
+                            {formatUKDate(job.date)}
+                          </strong>
                           <span>•</span>
                           <span>{job.displayTime}</span>
-                        </span>
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
-                        <span className="inline-flex items-center gap-2 px-2 py-1 rounded border border-gray-200">
-                          <span>{job.bedrooms ?? 0} bed</span>
-                          <span>·</span>
-                          <span>{job.bathrooms ?? 0} bath</span>
-                          <span>·</span>
-                          <span>{job.livingRooms ?? 0} living</span>
-                          <span>·</span>
-                          <span>{job.kitchens ?? 0} kitchen</span>
                         </span>
                       </div>
 
@@ -1429,7 +2083,9 @@ export default function Jobs() {
 
       {/* MY ASSIGNED */}
       <section>
-        <h2 className="text-xl font-semibold mb-4 text-gray-800">My Assigned Jobs</h2>
+        <h2 className="text-xl font-semibold mb-4 text-gray-800">
+          My Assigned Jobs
+        </h2>
         <div className="space-y-4">
           {myJobs.length === 0 ? (
             <p className="text-gray-500">You have no assigned jobs.</p>
@@ -1441,36 +2097,37 @@ export default function Jobs() {
                 <article
                   key={job.id}
                   className="bg-white rounded-2xl shadow p-4 md:p-5 border border-gray-100"
-                  style={{ borderLeftWidth: 6, borderLeftColor: isConfirmed ? '#16a34a' : '#f59e0b' }}
+                  style={{
+                    borderLeftWidth: 6,
+                    borderLeftColor: isConfirmed
+                      ? '#16a34a'
+                      : '#f59e0b',
+                  }}
                 >
                   <div className="md:flex md:items-start md:justify-between md:gap-6">
                     {/* LEFT content */}
                     <div className="flex-1 space-y-3">
                       <div>
-                        <h3 className="text-base font-semibold text-gray-900">{job.customerName || 'Customer'}</h3>
-                        <div className="text-sm text-gray-600 mt-1">{job.displayAddress}</div>
+                        <h3 className="text-base font-semibold text-gray-900">
+                          {job.customerName || 'Customer'}
+                        </h3>
+                        <div className="text-sm text-gray-600 mt-1">
+                          {job.displayAddress}
+                        </div>
                         {job.customerPhone && (
-                          <div className="text-sm text-gray-700 mt-1">{job.customerPhone}</div>
+                          <div className="text-sm text-gray-700 mt-1">
+                            {job.customerPhone}
+                          </div>
                         )}
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
                         <span className="inline-flex items-center gap-2 px-2 py-1 rounded border border-gray-200">
-                          <strong className="text-gray-800">{formatUKDate(job.date)}</strong>
+                          <strong className="text-gray-800">
+                            {formatUKDate(job.date)}
+                          </strong>
                           <span>•</span>
                           <span>{job.displayTime}</span>
-                        </span>
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
-                        <span className="inline-flex items-center gap-2 px-2 py-1 rounded border border-gray-200">
-                          <span>{job.bedrooms ?? 0} bed</span>
-                          <span>·</span>
-                          <span>{job.bathrooms ?? 0} bath</span>
-                          <span>·</span>
-                          <span>{job.livingRooms ?? 0} living</span>
-                          <span>·</span>
-                          <span>{job.kitchens ?? 0} kitchen</span>
                         </span>
                       </div>
 
@@ -1529,7 +2186,7 @@ export default function Jobs() {
         </div>
       </section>
 
-      {/* VIEW JOB MODAL (unchanged except data shown) */}
+      {/* VIEW JOB MODAL (updated rooms display) */}
       {viewJob && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
           <div className="w-full max-w-2xl rounded-xl bg-white p-4 shadow-xl overflow-auto max-h-[85vh]">
@@ -1548,43 +2205,357 @@ export default function Jobs() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-800">
               <div>
                 <div className="text-sm text-gray-600">Contact</div>
-                <div className="text-sm text-gray-900">{viewJob.customerPhone || '—'}</div>
+                <div className="text-sm text-gray-900">
+                  {viewJob.customerPhone || '—'}
+                </div>
 
                 <div className="text-sm text-gray-600 mt-3">Address</div>
                 <div className="text-sm text-gray-900">
                   {typeof viewJob.address === 'string'
                     ? viewJob.address
-                    : [viewJob.address?.line1, viewJob.address?.line2, viewJob.address?.town, viewJob.address?.county, viewJob.address?.postcode].filter(Boolean).join(', ')}
+                    : [
+                        viewJob.address?.line1,
+                        viewJob.address?.line2,
+                        viewJob.address?.town,
+                        viewJob.address?.county,
+                        viewJob.address?.postcode,
+                      ]
+                        .filter(Boolean)
+                        .join(', ')}
                 </div>
 
-                <div className="text-sm text-gray-600 mt-3">Add-ons</div>
+                <div className="text-sm text-gray-600 mt-3">
+                  Rooms / Areas
+                </div>
                 <div className="text-sm text-gray-900">
-                  {Array.isArray(viewJob.addOns) ? viewJob.addOns.join(', ') : (viewJob.addOns ?? 'None')}
+                  {(() => {
+                    // Prefer new booking-builder summaries (roomSummaries)
+                    if (
+                      Array.isArray(viewJob.roomSummaries) &&
+                      viewJob.roomSummaries.length > 0
+                    ) {
+                      const rows = viewJob.roomSummaries
+                        .map((r, idx) => {
+                          const count = Number(r.count ?? 0);
+                          if (!count) return null;
+
+                          const label =
+                            r.label ||
+                            labelRoomType(r.typeId);
+
+                          const sizeNames = Array.isArray(r.sizes)
+                            ? r.sizes
+                                .map((sid) => {
+                                  const key = (sid || '')
+                                    .toLowerCase();
+                                  return (
+                                    SIZE_LABELS[key] || sid
+                                  );
+                                })
+                                .filter(Boolean)
+                            : [];
+
+                          const rightText =
+                            sizeNames.length > 0
+                              ? `${count} room${
+                                  count > 1 ? 's' : ''
+                                } (${sizeNames.join(', ')})`
+                              : `${count} room${
+                                  count > 1 ? 's' : ''
+                                }`;
+
+                          return (
+                            <div
+                              key={idx}
+                              className="flex items-baseline justify-between gap-3"
+                            >
+                              <span className="text-sm text-gray-900">
+                                {label}
+                              </span>
+                              <span className="text-xs text-gray-600 whitespace-nowrap">
+                                {rightText}
+                              </span>
+                            </div>
+                          );
+                        })
+                        .filter(Boolean);
+
+                      if (rows.length > 0) {
+                        return (
+                          <div className="space-y-1">
+                            {rows}
+                          </div>
+                        );
+                      }
+                    }
+
+                    // Prefer structured roomSelections (new format) if no roomSummaries
+                    if (
+                      Array.isArray(viewJob.roomSelections) &&
+                      viewJob.roomSelections.length > 0
+                    ) {
+                      const items = viewJob.roomSelections
+                        .map((r, idx) => {
+                          const count = Number(r.count ?? 0);
+                          if (!count) return null;
+                          const typeLabel = labelRoomType(r.typeId);
+                          const sizeKey = (r.sizeId || '').toLowerCase();
+                          const sizeLabel = SIZE_LABELS[sizeKey] || '';
+                          return (
+                            <li key={idx}>
+                              {count}× {typeLabel}
+                              {sizeLabel ? ` (${sizeLabel})` : ''}
+                            </li>
+                          );
+                        })
+                        .filter(Boolean);
+
+                      if (items.length > 0) {
+                        return (
+                          <ul className="list-disc list-inside space-y-1">
+                            {items}
+                          </ul>
+                        );
+                      }
+                    }
+
+                    // Fallback: legacy home-style counts
+                    const b = parseCount(viewJob.bedrooms);
+                    const baths = parseCount(viewJob.bathrooms);
+                    const liv = parseCount(viewJob.livingRooms);
+                    const k = parseCount(viewJob.kitchens);
+                    const util = parseCount(viewJob.utilityRooms);
+
+                    const parts: string[] = [];
+                    if (b)
+                      parts.push(
+                        `${b} bedroom${b > 1 ? 's' : ''}`
+                      );
+                    if (liv)
+                      parts.push(
+                        `${liv} living room${liv > 1 ? 's' : ''}`
+                      );
+                    if (k)
+                      parts.push(
+                        `${k} kitchen${k > 1 ? 's' : ''}`
+                      );
+                    if (baths)
+                      parts.push(
+                        `${baths} bathroom${
+                          baths > 1 ? 's' : ''
+                        }`
+                      );
+                    if (util)
+                      parts.push(
+                        `${util} utility room${
+                          util > 1 ? 's' : ''
+                        }`
+                      );
+
+                    if (parts.length) {
+                      return (
+                        <ul className="list-disc list-inside space-y-1">
+                          {parts.map((p, i) => (
+                            <li key={i}>{p}</li>
+                          ))}
+                        </ul>
+                      );
+                    }
+
+                    if (Array.isArray(viewJob.additionalRooms)) {
+                      if (!viewJob.additionalRooms.length) return '—';
+                      return (
+                        <ul className="list-disc list-inside space-y-1">
+                          {viewJob.additionalRooms.map((r, i) => (
+                            <li key={i}>{r}</li>
+                          ))}
+                        </ul>
+                      );
+                    }
+
+                    return viewJob.additionalRooms ?? '—';
+                  })()}
                 </div>
 
-                <div className="text-sm text-gray-600 mt-3">Notes / Additional Rooms</div>
+                {(() => {
+                  // For the new roomSummaries format we already show counts & sizes above, so don't repeat.
+                  if (
+                    Array.isArray(viewJob.roomSummaries) &&
+                    viewJob.roomSummaries.length > 0
+                  ) {
+                    return null;
+                  }
+
+                  // Structured summary for room sizes & toilets (roomSelections / office / toilets)
+                  if (
+                    Array.isArray(viewJob.roomSelections) &&
+                    viewJob.roomSelections.length > 0
+                  ) {
+                    const sizeCounts: Record<string, number> = {};
+                    for (const r of viewJob.roomSelections) {
+                      const key = (r.sizeId || '').toLowerCase();
+                      const count = Number(r.count ?? 0);
+                      if (!key || !count) continue;
+                      sizeCounts[key] = (sizeCounts[key] || 0) + count;
+                    }
+                    const sizeParts = Object.entries(sizeCounts)
+                      .filter(
+                        ([k, v]) => v > 0 && SIZE_LABELS[k]
+                      )
+                      .map(
+                        ([k, v]) =>
+                          `${v} ${SIZE_LABELS[k]} room${
+                            v > 1 ? 's' : ''
+                          }`
+                      );
+
+                    let totalCubicles =
+                      typeof viewJob.totalCubicles === 'number'
+                        ? viewJob.totalCubicles
+                        : 0;
+                    if (
+                      !totalCubicles &&
+                      Array.isArray(viewJob.toiletSelections)
+                    ) {
+                      totalCubicles = viewJob.toiletSelections.reduce(
+                        (sum, t) => sum + (Number(t.count ?? 0) || 0),
+                        0
+                      );
+                    }
+                    const toiletRooms =
+                      typeof viewJob.toiletRoomsCount === 'number'
+                        ? viewJob.toiletRoomsCount
+                        : 0;
+                    const toiletSizeKey = (
+                      viewJob.toiletSizeId || ''
+                    ).toLowerCase();
+                    const toiletSizeLabel =
+                      SIZE_LABELS[toiletSizeKey] || '';
+
+                    if (
+                      !sizeParts.length &&
+                      !totalCubicles &&
+                      !toiletRooms
+                    )
+                      return null;
+
+                    return (
+                      <div className="mt-2 text-xs text-gray-600">
+                        {sizeParts.length > 0 && (
+                          <>
+                            Room sizes:{' '}
+                            <span className="text-gray-900 text-sm">
+                              {sizeParts.join(' · ')}
+                            </span>
+                          </>
+                        )}
+                        {(totalCubicles || toiletRooms) && (
+                          <div className="mt-1">
+                            Toilets:{' '}
+                            <span className="text-gray-900 text-sm">
+                              {totalCubicles
+                                ? `${totalCubicles} cubicle${
+                                    totalCubicles === 1
+                                      ? ''
+                                      : 's'
+                                  }`
+                                : ''}
+                              {totalCubicles && toiletRooms ? ' in ' : ''}
+                              {toiletRooms
+                                ? `${toiletRooms} room${
+                                    toiletRooms === 1 ? '' : 's'
+                                  }`
+                                : ''}
+                              {toiletSizeLabel
+                                ? ` (${toiletSizeLabel})`
+                                : ''}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  const rooms = viewJob.office?.rooms;
+                  if (!Array.isArray(rooms) || rooms.length === 0)
+                    return null;
+                  const sizeCounts: Record<string, number> = {};
+                  for (const r of rooms) {
+                    const key = (r.sizeId || '').toLowerCase();
+                    if (!key) continue;
+                    sizeCounts[key] = (sizeCounts[key] || 0) + 1;
+                  }
+                  const sizeParts = Object.entries(sizeCounts)
+                    .filter(
+                      ([k, v]) =>
+                        v > 0 && SIZE_LABELS[k]
+                    )
+                    .map(
+                      ([k, v]) =>
+                        `${v} ${SIZE_LABELS[k]} room${
+                          v > 1 ? 's' : ''
+                        }`
+                    );
+                  if (!sizeParts.length) return null;
+                  return (
+                    <div className="mt-2 text-xs text-gray-600">
+                      Room sizes:{' '}
+                      <span className="text-gray-900 text-sm">
+                        {sizeParts.join(' · ')}
+                      </span>
+                    </div>
+                  );
+                })()}
+
+                <div className="text-sm text-gray-600 mt-3">
+                  Add-ons
+                </div>
                 <div className="text-sm text-gray-900">
-                  {Array.isArray(viewJob.additionalRooms) ? viewJob.additionalRooms.join(', ') : (viewJob.additionalRooms ?? '—')}
+                  {Array.isArray(viewJob.addOns)
+                    ? viewJob.addOns.join(', ')
+                    : viewJob.addOns ?? 'None'}
+                </div>
+
+                <div className="text-sm text-gray-600 mt-3">
+                  Notes / Additional Rooms
+                </div>
+                <div className="text-sm text-gray-900">
+                  {viewJob.additionalInfo?.trim()
+                    ? viewJob.additionalInfo
+                    : '—'}
                 </div>
               </div>
 
               <div>
                 <div className="text-sm text-gray-600">Date & Time</div>
-                <div className="text-sm text-gray-900">{formatUKDate(viewJob.date)} • {viewJob.displayTime || viewJob.startTime || '—'}</div>
+                <div className="text-sm text-gray-900">
+                  {formatUKDate(viewJob.date)} •{' '}
+                  {viewJob.displayTime ||
+                    viewJob.startTime ||
+                    '—'}
+                </div>
 
                 <div className="text-sm text-gray-600 mt-3">Service</div>
-                <div className="text-sm text-gray-900">{viewJob.serviceType || 'Cleaning Service'}</div>
+                <div className="text-sm text-gray-900">
+                  {viewJob.serviceType || 'Cleaning Service'}
+                </div>
 
                 <div className="text-sm text-gray-600 mt-3">Team</div>
                 <div className="text-sm text-gray-900">
-                  {viewJob.twoCleaners ? (twoCleanerLine(viewJob) ?? 'Two-cleaner job') : 'Single cleaner'}
+                  {viewJob.twoCleaners
+                    ? twoCleanerLine(viewJob) ?? 'Two-cleaner job'
+                    : 'Single cleaner'}
                 </div>
 
-                <div className="text-sm text-gray-600 mt-3">Your Pay</div>
+                <div className="text-sm text-gray-600 mt-3">
+                  Your Pay
+                </div>
                 <div className="text-sm text-gray-900">
                   {(() => {
                     const h = Number(viewJob.estimatedHours ?? 0) || 0;
-                    return h ? `${currency.format(h * staffRate)}` : '—';
+                    return h
+                      ? `${currency.format(h * staffRate)}`
+                      : '—';
                   })()}
                 </div>
               </div>
