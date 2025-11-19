@@ -179,6 +179,9 @@ type BookingDoc = {
   assignedStaffIds?: string[];
   assignedStaffNames?: string[];
   confirmedStaffIds?: string[];
+
+  // cancelled flag
+  cancelled?: boolean;
 };
 
 type Job = {
@@ -258,7 +261,10 @@ type LeafletMapLike = {
   setView: (center: [number, number], zoom: number) => void;
   setZoom: (zoom: number) => void;
   // NEW: add fitBounds so TS is happy
-  fitBounds?: (bounds: [[number, number], [number, number]], options?: any) => void;
+  fitBounds?: (
+    bounds: [[number, number], [number, number]],
+    options?: any
+  ) => void;
 };
 
 function formatUKDate(dateStr: string): string {
@@ -274,6 +280,17 @@ function formatUKDate(dateStr: string): string {
     month: 'long',
     year: 'numeric',
   });
+}
+
+function isPastDate(ymd?: string) {
+  if (!ymd) return false;
+  const [y, m, d] = ymd.split('-').map(Number);
+  if (!y || !m || !d) return false;
+  const booking = new Date(y, m - 1, d);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  booking.setHours(0, 0, 0, 0);
+  return booking < today;
 }
 
 // helpers for two-cleaner model (works with legacy fields)
@@ -677,19 +694,37 @@ export default function Jobs() {
     }
   };
 
-  // unassigned = not fully staffed yet
+  // unassigned = not fully staffed yet (exclude cancelled + completed)
   const visibleUnassignedJobs = useMemo(() => {
     if (!uid) return [];
     if (!autoAssign) return [];
     return jobs.filter(
-      (j) => getAssignedIds(j).length < requiredCleaners(j)
+      (j) =>
+        !j.cancelled &&
+        !isPastDate(j.date) &&
+        getAssignedIds(j).length < requiredCleaners(j)
     );
   }, [jobs, uid, autoAssign]);
 
-  // my jobs = I'm in assigned list
-  const myJobs = useMemo(() => {
+  // my jobs, split into active vs completed, exclude cancelled
+  const myActiveJobs = useMemo(() => {
     if (!uid) return [];
-    return jobs.filter((j) => getAssignedIds(j).includes(uid));
+    return jobs.filter(
+      (j) =>
+        !j.cancelled &&
+        !isPastDate(j.date) &&
+        getAssignedIds(j).includes(uid)
+    );
+  }, [jobs, uid]);
+
+  const myCompletedJobs = useMemo(() => {
+    if (!uid) return [];
+    return jobs.filter(
+      (j) =>
+        !j.cancelled &&
+        isPastDate(j.date) &&
+        getAssignedIds(j).includes(uid)
+    );
   }, [jobs, uid]);
 
   const getErrorMessage = (e: unknown): string =>
@@ -1512,1100 +1547,1191 @@ export default function Jobs() {
                   </div>
                 )}
 
-                {step === 2 && (
-                  <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">
-                      Notice time before jobs (hours)
-                    </div>
-                    <input
-                      className={inputCls}
-                      type="number"
-                      min={0}
-                      max={168}
-                      placeholder="Enter hours"
-                      value={
-                        Number.isFinite(minNoticeHours)
-                          ? String(minNoticeHours)
-                          : ''
-                      }
-                      onChange={(e) =>
-                        setMinNoticeHours(
-                          e.target.value === ''
-                            ? (NaN as unknown as number)
-                            : Number(e.target.value)
-                        )
-                      }
-                    />
-                  </div>
-                )}
+              {step === 2 && (
+              <div>
+                <div className="text-base font-semibold text-gray-900 mb-1">
+                  Notice time before jobs (hours)
+                </div>
+                <input
+                  className={inputCls}
+                  type="number"
+                  min={0}
+                  max={168}
+                  placeholder="Enter hours"
+                  value={
+                    Number.isFinite(minNoticeHours)
+                      ? String(minNoticeHours)
+                      : ''
+                  }
+                  onChange={(e) =>
+                    setMinNoticeHours(
+                      e.target.value === ''
+                        ? (NaN as unknown as number)
+                        : Number(e.target.value)
+                    )
+                  }
+                />
+              </div>
+            )}
 
-                {step === 3 && (
-                  <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">
-                      Gap needed between jobs (minutes)
-                    </div>
-                    <select
-                      className={inputCls}
-                      value={String(travelBufferMins)}
-                      onChange={(e) =>
-                        setTravelBufferMins(Number(e.target.value))
-                      }
-                    >
-                      {[0, 15, 30, 45, 60, 90].map((n) => (
-                        <option key={n} value={n}>
-                          {n}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
+            {step === 3 && (
+              <div>
+                <div className="text-base font-semibold text-gray-900 mb-1">
+                  Gap needed between jobs (minutes)
+                </div>
+                <select
+                  className={inputCls}
+                  value={String(travelBufferMins)}
+                  onChange={(e) =>
+                    setTravelBufferMins(Number(e.target.value))
+                  }
+                >
+                  {[0, 15, 30, 45, 60, 90].map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
-                {step === 4 && (
-                  <div>
-                    <div className="text-base font-semibold text-gray-900 mb-2">
-                      Weekly availability
-                    </div>
-                    <div className="space-y-2 max-h-72 overflow-auto pr-1">
-                      {(Object.keys(availability) as DayName[]).map(
-                        (day) => (
-                          <div
-                            key={day}
-                            className="flex flex-wrap items-center gap-2 border rounded-lg p-3"
-                          >
-                            <div className="w-28 font-medium text-gray-900">
-                              {day}
-                            </div>
-                            <label className="inline-flex items-center gap-2 text-gray-900">
-                              <input
-                                type="checkbox"
-                                className="h-4 w-4"
-                                checked={availability[day].available}
-                                onChange={(e) =>
-                                  setDay(
-                                    day,
-                                    'available',
-                                    e.target.checked
-                                  )
-                                }
-                              />
-                              Available
-                            </label>
-                            {availability[day].available && (
-                              <div className="flex flex-wrap items-center gap-2 ml-auto">
-                                <input
-                                  aria-label={`${day} start time`}
-                                  type="time"
-                                  className="h-10 px-2 rounded border border-gray-300 w-28 text-gray-900"
-                                  value={availability[day].from}
-                                  onChange={(e) =>
-                                    setDay(day, 'from', e.target.value)
-                                  }
-                                />
-                                <span className="text-sm text-gray-900">
-                                  –
-                                </span>
-                                <input
-                                  aria-label={`${day} end time`}
-                                  type="time"
-                                  className="h-10 px-2 rounded border border-gray-300 w-28 text-gray-900"
-                                  value={availability[day].to}
-                                  onChange={(e) =>
-                                    setDay(day, 'to', e.target.value)
-                                  }
-                                />
-                              </div>
-                            )}
+            {step === 4 && (
+              <div>
+                <div className="text-base font-semibold text-gray-900 mb-2">
+                  Weekly availability
+                </div>
+                <div className="space-y-2 max-h-72 overflow-auto pr-1">
+                  {(Object.keys(availability) as DayName[]).map(
+                    (day) => (
+                      <div
+                        key={day}
+                        className="flex flex-wrap items-center gap-2 border rounded-lg p-3"
+                      >
+                        <div className="w-28 font-medium text-gray-900">
+                          {day}
+                        </div>
+                        <label className="inline-flex items-center gap-2 text-gray-900">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4"
+                            checked={availability[day].available}
+                            onChange={(e) =>
+                              setDay(
+                                day,
+                                'available',
+                                e.target.checked
+                              )
+                            }
+                          />
+                          Available
+                        </label>
+                        {availability[day].available && (
+                          <div className="flex flex-wrap items-center gap-2 ml-auto">
+                            <input
+                              aria-label={`${day} start time`}
+                              type="time"
+                              className="h-10 px-2 rounded border border-gray-300 w-28 text-gray-900"
+                              value={availability[day].from}
+                              onChange={(e) =>
+                                setDay(day, 'from', e.target.value)
+                              }
+                            />
+                            <span className="text-sm text-gray-900">
+                              –
+                            </span>
+                            <input
+                              aria-label={`${day} end time`}
+                              type="time"
+                              className="h-10 px-2 rounded border border-gray-300 w-28 text-gray-900"
+                              value={availability[day].to}
+                              onChange={(e) =>
+                                setDay(day, 'to', e.target.value)
+                              }
+                            />
                           </div>
-                        )
-                      )}
-                    </div>
-                  </div>
-                )}
+                        )}
+                      </div>
+                    )
+                  )}
+                </div>
+              </div>
+            )}
 
-                {step === 5 && (
-                  <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">
-                      Do you have a car?
-                    </div>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setHasCar(false)}
-                        className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          hasCar === false
-                            ? 'border-[#0071bc] text-[#0071bc]'
-                            : 'border-gray-300 text-gray-800'
-                        }`}
-                      >
-                        No
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setHasCar(true)}
-                        className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          hasCar === true
-                            ? 'border-[#0071bc] text-[#0071bc]'
-                            : 'border-gray-300 text-gray-800'
-                        }`}
-                      >
-                        Yes
-                      </button>
-                    </div>
-                  </div>
-                )}
+            {step === 5 && (
+              <div>
+                <div className="text-base font-semibold text-gray-900 mb-1">
+                  Do you have a car?
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setHasCar(false)}
+                    className={`px-3 py-1.5 rounded border cursor-pointer ${
+                      hasCar === false
+                        ? 'border-[#0071bc] text-[#0071bc]'
+                        : 'border-gray-300 text-gray-800'
+                    }`}
+                  >
+                    No
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHasCar(true)}
+                    className={`px-3 py-1.5 rounded border cursor-pointer ${
+                      hasCar === true
+                        ? 'border-[#0071bc] text-[#0071bc]'
+                        : 'border-gray-300 text-gray-800'
+                    }`}
+                  >
+                    Yes
+                  </button>
+                </div>
+              </div>
+            )}
 
-                {step === 6 && (
-                  <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">
-                      Do you have your own supplies?
-                    </div>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setBringsSupplies(false)}
-                        className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          bringsSupplies === false
-                            ? 'border-[#0071bc] text-[#0071bc]'
-                            : 'border-gray-300 text-gray-800'
-                        }`}
-                      >
-                        No
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setBringsSupplies(true)}
-                        className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          bringsSupplies === true
-                            ? 'border-[#0071bc] text-[#0071bc]'
-                            : 'border-gray-300 text-gray-800'
-                        }`}
-                      >
-                        Yes
-                      </button>
-                    </div>
-                  </div>
-                )}
+            {step === 6 && (
+              <div>
+                <div className="text-base font-semibold text-gray-900 mb-1">
+                  Do you have your own supplies?
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setBringsSupplies(false)}
+                    className={`px-3 py-1.5 rounded border cursor-pointer ${
+                      bringsSupplies === false
+                        ? 'border-[#0071bc] text-[#0071bc]'
+                        : 'border-gray-300 text-gray-800'
+                    }`}
+                  >
+                    No
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBringsSupplies(true)}
+                    className={`px-3 py-1.5 rounded border cursor-pointer ${
+                      bringsSupplies === true
+                        ? 'border-[#0071bc] text-[#0071bc]'
+                        : 'border-gray-300 text-gray-800'
+                    }`}
+                  >
+                    Yes
+                  </button>
+                </div>
+              </div>
+            )}
 
-                {step === 7 && bringsSupplies && (
-                  <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">
-                      Which equipment can you bring?
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {[
-                        ['vacuum', 'Vacuum cleaner'],
-                        ['mopBucket', 'Mop & bucket'],
-                        ['duster', 'Duster'],
-                        ['broomDustpan', 'Broom & dustpan'],
-                        ['microfibre', 'Microfibre cloths'],
-                        ['spotCleaner', 'Carpet spot cleaner (handheld)'],
-                        ['none', 'None of the above'],
-                      ].map(([key, label]) => (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() => {
-                            if (key === 'none') {
-                              setEquipment(['none']);
-                            } else {
-                              const next = equipment.includes('none')
-                                ? []
-                                : [...equipment];
-                              if (next.includes(key)) {
-                                setEquipment(
-                                  next.filter((k) => k !== key)
+            {step === 7 && bringsSupplies && (
+              <div>
+                <div className="text-base font-semibold text-gray-900 mb-1">
+                  Which equipment can you bring?
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    ['vacuum', 'Vacuum cleaner'],
+                    ['mopBucket', 'Mop & bucket'],
+                    ['duster', 'Duster'],
+                    ['broomDustpan', 'Broom & dustpan'],
+                    ['microfibre', 'Microfibre cloths'],
+                    ['spotCleaner', 'Carpet spot cleaner (handheld)'],
+                    ['none', 'None of the above'],
+                  ].map(([key, label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => {
+                        if (key === 'none') {
+                          setEquipment(['none']);
+                        } else {
+                          const next = equipment.includes('none')
+                            ? []
+                            : [...equipment];
+                          if (next.includes(key)) {
+                            setEquipment(
+                              next.filter((k) => k !== key)
+                            );
+                          } else {
+                            setEquipment([...next, key]);
+                          }
+                        }
+                      }}
+                      className={`px-3 py-1.5 rounded border cursor-pointer ${
+                        equipment.includes(key)
+                          ? 'border-[#0071bc] text-[#0071bc]'
+                          : 'border-gray-300 text-gray-800'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {step === 7 && !bringsSupplies && (
+              <div>
+                <div className="text-base font-semibold text-gray-900 mb-1">
+                  Equipment
+                </div>
+                <p className="text-sm text-gray-700">
+                  You indicated you don't bring your own supplies, so
+                  we'll skip the equipment question.
+                </p>
+              </div>
+            )}
+
+            {step === 8 && (
+              <div>
+                <div className="text-base font-semibold text-gray-900 mb-1">
+                  Are you allergic to any animals?
+                </div>
+                <div className="space-y-3">
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPets([])}
+                      className={`px-3 py-1.5 rounded border cursor-pointer ${
+                        pets.length === 0
+                          ? 'border-[#0071bc] text-[#0071bc]'
+                          : 'border-gray-300 text-gray-800'
+                      }`}
+                    >
+                      No
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (pets.length === 0) setPets(['dogs']);
+                      }}
+                      className={`px-3 py-1.5 rounded border cursor-pointer ${
+                        pets.length > 0
+                          ? 'border-[#0071bc] text-[#0071bc]'
+                          : 'border-gray-300 text-gray-800'
+                      }`}
+                    >
+                      Yes
+                    </button>
+                  </div>
+
+                  {pets.length > 0 && (
+                    <div>
+                      <p className="text-sm text-gray-700 mb-2">
+                        Select all animals you're allergic to:
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {[
+                          ['dogs', 'Dogs'],
+                          ['cats', 'Cats'],
+                          ['birds', 'Birds'],
+                          ['rabbits', 'Rabbits'],
+                          ['rodents', 'Rodents (hamsters, guinea pigs, etc.)'],
+                          ['reptiles', 'Reptiles'],
+                          ['horses', 'Horses'],
+                        ].map(([key, label]) => (
+                          <button
+                            key={key}
+                            type="button"
+                            onClick={() => {
+                              if (pets.includes(key)) {
+                                const remaining = pets.filter(
+                                  (p) => p !== key
+                                );
+                                setPets(
+                                  remaining.length > 0
+                                    ? remaining
+                                    : [key]
                                 );
                               } else {
-                                setEquipment([...next, key]);
+                                setPets([...pets, key]);
                               }
-                            }
-                          }}
-                          className={`px-3 py-1.5 rounded border cursor-pointer ${
-                            equipment.includes(key)
-                              ? 'border-[#0071bc] text-[#0071bc]'
-                              : 'border-gray-300 text-gray-800'
-                          }`}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {step === 7 && !bringsSupplies && (
-                  <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">
-                      Equipment
-                    </div>
-                    <p className="text-sm text-gray-700">
-                      You indicated you don't bring your own supplies, so
-                      we'll skip the equipment question.
-                    </p>
-                  </div>
-                )}
-
-                {step === 8 && (
-                  <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">
-                      Are you allergic to any animals?
-                    </div>
-                    <div className="space-y-3">
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setPets([])}
-                          className={`px-3 py-1.5 rounded border cursor-pointer ${
-                            pets.length === 0
-                              ? 'border-[#0071bc] text-[#0071bc]'
-                              : 'border-gray-300 text-gray-800'
-                          }`}
-                        >
-                          No
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (pets.length === 0) setPets(['dogs']);
-                          }}
-                          className={`px-3 py-1.5 rounded border cursor-pointer ${
-                            pets.length > 0
-                              ? 'border-[#0071bc] text-[#0071bc]'
-                              : 'border-gray-300 text-gray-800'
-                          }`}
-                        >
-                          Yes
-                        </button>
-                      </div>
-
-                      {pets.length > 0 && (
-                        <div>
-                          <p className="text-sm text-gray-700 mb-2">
-                            Select all animals you're allergic to:
-                          </p>
-                          <div className="flex flex-wrap gap-2">
-                            {[
-                              ['dogs', 'Dogs'],
-                              ['cats', 'Cats'],
-                              ['birds', 'Birds'],
-                              ['rabbits', 'Rabbits'],
-                              ['rodents', 'Rodents (hamsters, guinea pigs, etc.)'],
-                              ['reptiles', 'Reptiles'],
-                              ['horses', 'Horses'],
-                            ].map(([key, label]) => (
-                              <button
-                                key={key}
-                                type="button"
-                                onClick={() => {
-                                  if (pets.includes(key)) {
-                                    const remaining = pets.filter(
-                                      (p) => p !== key
-                                    );
-                                    setPets(
-                                      remaining.length > 0
-                                        ? remaining
-                                        : [key]
-                                    );
-                                  } else {
-                                    setPets([...pets, key]);
-                                  }
-                                }}
-                                className={`px-3 py-1.5 rounded border cursor-pointer ${
-                                  pets.includes(key)
-                                    ? 'border-[#0071bc] bg-[#0071bc] text-white'
-                                    : 'border-gray-300 text-gray-800 hover:border-gray-400'
-                                }`}
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
-                          <p className="text-xs text-gray-600 mt-2">
-                            Click to select/deselect. You can choose multiple.
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {step === 9 && (
-                  <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">
-                      Services you can do
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {[
-                        ['standard', 'Standard clean'],
-                        ['deep', 'Deep clean'],
-                        ['eot', 'End of tenancy / Move-out'],
-                        ['oven', 'Oven clean'],
-                        ['fridge', 'Fridge clean'],
-                        ['laundry', 'Laundry / Ironing'],
-                        ['spotClean', 'Carpet / Upholstery spot clean'],
-                      ].map(([key, label]) => (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() =>
-                            toggleIn(services, key, setServices)
-                          }
-                          className={`px-3 py-1.5 rounded border cursor-pointer ${
-                            services.includes(key)
-                              ? 'border-[#0071bc] text-[#0071bc]'
-                              : 'border-gray-300 text-gray-800'
-                          }`}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {step === 10 && (
-                  <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">
-                      Okay with team jobs?
-                    </div>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setTeamJobs(false)}
-                        className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          teamJobs === false
-                            ? 'border-[#0071bc] text-[#0071bc]'
-                            : 'border-gray-300 text-gray-800'
-                        }`}
-                      >
-                        No
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setTeamJobs(true)}
-                        className={`px-3 py-1.5 rounded border cursor-pointer ${
-                          teamJobs === true
-                            ? 'border-[#0071bc] text-[#0071bc]'
-                            : 'border-gray-300 text-gray-800'
-                        }`}
-                      >
-                        Yes
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {step === 11 && (
-                  <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">
-                      Right to work in the UK
-                    </div>
-                    <p className="text-sm text-gray-800 mb-2">
-                      Confirm you're legally allowed to work in the UK.
-                      You may be asked to provide proof.
-                    </p>
-                    <label className="inline-flex items-center gap-2 text-gray-900">
-                      <input
-                        type="checkbox"
-                        className="h-4 w-4"
-                        checked={rightToWorkUk}
-                        onChange={(e) =>
-                          setRightToWorkUk(e.target.checked)
-                        }
-                      />
-                      I confirm I have the right to work in the UK
-                    </label>
-                  </div>
-                )}
-
-                {step === 12 && (
-                  <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">
-                      Date of birth
-                    </div>
-                    <input
-                      className={inputCls}
-                      type="date"
-                      value={dateOfBirth}
-                      onChange={(e) =>
-                        setDateOfBirth(e.target.value)
-                      }
-                    />
-                  </div>
-                )}
-
-                {step === 13 && (
-                  <div>
-                    <div className="text-base font-semibold text-gray-900 mb-1">
-                      Bank details
-                    </div>
-                    <p className="text-sm text-gray-800 mb-2">
-                      We use these details to pay you for completed jobs.
-                    </p>
-                    <div className="space-y-2">
-                      <input
-                        className={inputCls}
-                        placeholder="Account holder name"
-                        value={bankAccountName}
-                        onChange={(e) =>
-                          setBankAccountName(e.target.value)
-                        }
-                      />
-                      <input
-                        className={inputCls}
-                        placeholder="Bank name"
-                        value={bankName}
-                        onChange={(e) =>
-                          setBankName(e.target.value)
-                        }
-                      />
-                      <input
-                        className={inputCls}
-                        placeholder="Sort code"
-                        value={bankSortCode}
-                        onChange={(e) =>
-                          setBankSortCode(e.target.value)
-                        }
-                      />
-                      <input
-                        className={inputCls}
-                        placeholder="Account number"
-                        value={bankAccountNumber}
-                        onChange={(e) =>
-                          setBankAccountNumber(e.target.value)
-                        }
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {stepError && (
-                <p className="text-sm text-red-600">{stepError}</p>
-              )}
-            </div>
-          </div>
-        </section>
-      )}
-
-      {/* AVAILABLE JOBS */}
-      <section>
-        <h2 className="text-xl font-semibold mb-4 text-gray-800">
-          Available Jobs
-        </h2>
-        <div className="space-y-4">
-          {visibleUnassignedJobs.length === 0 ? (
-            <p className="text-gray-500">
-              {autoAssign
-                ? 'No jobs waiting for assignment.'
-                : 'Auto-assign is OFF.'}
-            </p>
-          ) : (
-            visibleUnassignedJobs.map((job) => {
-              const teamNote =
-                twoCleanerLine(job) ||
-                (job.twoCleaners
-                  ? 'Team job — needs 2 cleaners'
-                  : null);
-              return (
-                <article
-                  key={job.id}
-                  className="bg-white border rounded-lg shadow-sm p-4 md:p-5"
-                >
-                  <div className="md:flex md:items-start md:justify-between md:gap-6">
-                    {/* LEFT content (flex-1 keeps width as content grows) */}
-                    <div className="flex-1 space-y-3">
-                      <div>
-                        <h3 className="text-base font-semibold text-gray-900">
-                          {job.customerName || 'Customer'}
-                        </h3>
-                        <div className="text-sm text-gray-600 mt-1">
-                          {job.displayAddress}
-                        </div>
-                        {job.customerPhone && (
-                          <div className="text-sm text-gray-700 mt-1">
-                            {job.customerPhone}
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
-                        <span className="inline-flex items-center gap-2 px-2 py-1 rounded border border-gray-200">
-                          <strong className="text-gray-800">
-                            {formatUKDate(job.date)}
-                          </strong>
-                          <span>•</span>
-                          <span>{job.displayTime}</span>
-                        </span>
-                      </div>
-
-                      {teamNote && (
-                        <div className="text-xs text-amber-700 bg-amber-50 inline-block px-2 py-1 rounded border border-amber-200">
-                          {teamNote}
-                        </div>
-                      )}
-
-                      <div className="text-sm font-semibold text-blue-700">
-                        {payText(job)}
-                      </div>
-                    </div>
-
-                    {/* RIGHT actions (auto width, small balanced gap) */}
-                    <div className="mt-3 md:mt-0 flex-shrink-0 flex flex-col items-end gap-2 min-w-[180px]">
-                      {/* mini tags above buttons, right-aligned */}
-                      <div className="flex items-center gap-2">
-                        {job.twoCleaners && <Tag>2 cleaners</Tag>}
-                        <Tag>{hoursTag(job)}</Tag>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => assignToMe(job.id)}
-                          className="bg-[#0071bc] text-white px-3 py-2 rounded-md hover:opacity-95 text-sm"
-                        >
-                          Assign to me
-                        </button>
-                        <button
-                          onClick={() => setViewJob(job)}
-                          className="rounded-md border px-3 py-2 text-gray-800 hover:bg-gray-50 text-sm"
-                        >
-                          View
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </article>
-              );
-            })
-          )}
-        </div>
-      </section>
-
-      {/* MY ASSIGNED */}
-      <section>
-        <h2 className="text-xl font-semibold mb-4 text-gray-800">
-          My Assigned Jobs
-        </h2>
-        <div className="space-y-4">
-          {myJobs.length === 0 ? (
-            <p className="text-gray-500">You have no assigned jobs.</p>
-          ) : (
-            myJobs.map((job) => {
-              const teamNote = twoCleanerLine(job);
-              const isConfirmed = confirmedJobs.includes(job.id);
-              return (
-                <article
-                  key={job.id}
-                  className="bg-white rounded-2xl shadow p-4 md:p-5 border border-gray-100"
-                  style={{
-                    borderLeftWidth: 6,
-                    borderLeftColor: isConfirmed
-                      ? '#16a34a'
-                      : '#f59e0b',
-                  }}
-                >
-                  <div className="md:flex md:items-start md:justify-between md:gap-6">
-                    {/* LEFT content */}
-                    <div className="flex-1 space-y-3">
-                      <div>
-                        <h3 className="text-base font-semibold text-gray-900">
-                          {job.customerName || 'Customer'}
-                        </h3>
-                        <div className="text-sm text-gray-600 mt-1">
-                          {job.displayAddress}
-                        </div>
-                        {job.customerPhone && (
-                          <div className="text-sm text-gray-700 mt-1">
-                            {job.customerPhone}
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
-                        <span className="inline-flex items-center gap-2 px-2 py-1 rounded border border-gray-200">
-                          <strong className="text-gray-800">
-                            {formatUKDate(job.date)}
-                          </strong>
-                          <span>•</span>
-                          <span>{job.displayTime}</span>
-                        </span>
-                      </div>
-
-                      {teamNote && (
-                        <div className="text-xs text-amber-700 bg-amber-50 inline-block px-2 py-1 rounded border border-amber-200">
-                          {teamNote}
-                        </div>
-                      )}
-
-                      <div className="text-sm font-semibold text-blue-700">
-                        {payText(job)}
-                      </div>
-                    </div>
-
-                    {/* RIGHT actions */}
-                    <div className="mt-3 md:mt-0 flex-shrink-0 flex flex-col items-end gap-2 min-w-[180px]">
-                      {/* mini tags above buttons */}
-                      <div className="flex items-center gap-2">
-                        {job.twoCleaners && <Tag>2 cleaners</Tag>}
-                        <Tag>{hoursTag(job)}</Tag>
-                        {isConfirmed && (
-                          <span className="px-2 py-1 rounded bg-green-50 border border-green-200 text-xs text-green-700">
-                            Confirmed
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => downloadChecklist(job)}
-                          className="bg-[#0071bc] text-white px-3 py-2 rounded-md hover:opacity-95 text-sm"
-                        >
-                          Checklist
-                        </button>
-                        {!isConfirmed && (
-                          <button
-                            onClick={() => confirmBooking(job)}
-                            className="bg-green-600 text-white px-3 py-2 rounded-md hover:opacity-95 text-sm"
+                            }}
+                            className={`px-3 py-1.5 rounded border cursor-pointer ${
+                              pets.includes(key)
+                                ? 'border-[#0071bc] bg-[#0071bc] text-white'
+                                : 'border-gray-300 text-gray-800 hover:border-gray-400'
+                            }`}
                           >
-                            Confirm
+                            {label}
                           </button>
-                        )}
-                        <button
-                          onClick={() => setViewJob(job)}
-                          className="rounded-md border px-3 py-2 text-gray-800 hover:bg-gray-50 text-sm"
-                        >
-                          View
-                        </button>
+                        ))}
                       </div>
+                      <p className="text-xs text-gray-600 mt-2">
+                        Click to select/deselect. You can choose multiple.
+                      </p>
                     </div>
-                  </div>
-                </article>
-              );
-            })
+                  )}
+                </div>
+              </div>
+            )}
+
+            {step === 9 && (
+              <div>
+                <div className="text-base font-semibold text-gray-900 mb-1">
+                  Services you can do
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    ['standard', 'Standard clean'],
+                    ['deep', 'Deep clean'],
+                    ['eot', 'End of tenancy / Move-out'],
+                    ['oven', 'Oven clean'],
+                    ['fridge', 'Fridge clean'],
+                    ['laundry', 'Laundry / Ironing'],
+                    ['spotClean', 'Carpet / Upholstery spot clean'],
+                  ].map(([key, label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() =>
+                        toggleIn(services, key, setServices)
+                      }
+                      className={`px-3 py-1.5 rounded border cursor-pointer ${
+                        services.includes(key)
+                          ? 'border-[#0071bc] text-[#0071bc]'
+                          : 'border-gray-300 text-gray-800'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {step === 10 && (
+              <div>
+                <div className="text-base font-semibold text-gray-900 mb-1">
+                  Okay with team jobs?
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setTeamJobs(false)}
+                    className={`px-3 py-1.5 rounded border cursor-pointer ${
+                      teamJobs === false
+                        ? 'border-[#0071bc] text-[#0071bc]'
+                        : 'border-gray-300 text-gray-800'
+                    }`}
+                  >
+                    No
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTeamJobs(true)}
+                    className={`px-3 py-1.5 rounded border cursor-pointer ${
+                      teamJobs === true
+                        ? 'border-[#0071bc] text-[#0071bc]'
+                        : 'border-gray-300 text-gray-800'
+                    }`}
+                  >
+                    Yes
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {step === 11 && (
+              <div>
+                <div className="text-base font-semibold text-gray-900 mb-1">
+                  Right to work in the UK
+                </div>
+                <p className="text-sm text-gray-800 mb-2">
+                  Confirm you're legally allowed to work in the UK.
+                  You may be asked to provide proof.
+                </p>
+                <label className="inline-flex items-center gap-2 text-gray-900">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4"
+                    checked={rightToWorkUk}
+                    onChange={(e) =>
+                      setRightToWorkUk(e.target.checked)
+                    }
+                  />
+                  I confirm I have the right to work in the UK
+                </label>
+              </div>
+            )}
+
+            {step === 12 && (
+              <div>
+                <div className="text-base font-semibold text-gray-900 mb-1">
+                  Date of birth
+                </div>
+                <input
+                  className={inputCls}
+                  type="date"
+                  value={dateOfBirth}
+                  onChange={(e) =>
+                    setDateOfBirth(e.target.value)
+                  }
+                />
+              </div>
+            )}
+
+            {step === 13 && (
+              <div>
+                <div className="text-base font-semibold text-gray-900 mb-1">
+                  Bank details
+                </div>
+                <p className="text-sm text-gray-800 mb-2">
+                  We use these details to pay you for completed jobs.
+                </p>
+                <div className="space-y-2">
+                  <input
+                    className={inputCls}
+                    placeholder="Account holder name"
+                    value={bankAccountName}
+                    onChange={(e) =>
+                      setBankAccountName(e.target.value)
+                    }
+                  />
+                  <input
+                    className={inputCls}
+                    placeholder="Bank name"
+                    value={bankName}
+                    onChange={(e) =>
+                      setBankName(e.target.value)
+                    }
+                  />
+                  <input
+                    className={inputCls}
+                    placeholder="Sort code"
+                    value={bankSortCode}
+                    onChange={(e) =>
+                      setBankSortCode(e.target.value)
+                    }
+                  />
+                  <input
+                    className={inputCls}
+                    placeholder="Account number"
+                    value={bankAccountNumber}
+                    onChange={(e) =>
+                      setBankAccountNumber(e.target.value)
+                    }
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {stepError && (
+            <p className="text-sm text-red-600">{stepError}</p>
           )}
         </div>
-      </section>
+      </div>
+    </section>
+  )}
 
-      {/* VIEW JOB MODAL (updated rooms display) */}
-      {viewJob && (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
-          <div className="w-full max-w-2xl rounded-xl bg-white p-4 shadow-xl overflow-auto max-h-[85vh]">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="text-lg font-semibold text-gray-900">
-                {viewJob.customerName || 'Customer'}
+  {/* AVAILABLE JOBS */}
+  <section>
+    <h2 className="text-xl font-semibold mb-4 text-gray-800">
+      Available Jobs
+    </h2>
+    <div className="space-y-4">
+      {visibleUnassignedJobs.length === 0 ? (
+        <p className="text-gray-500">
+          {autoAssign
+            ? 'No jobs waiting for assignment.'
+            : 'Auto-assign is OFF.'}
+        </p>
+      ) : (
+        visibleUnassignedJobs.map((job) => {
+          const teamNote =
+            twoCleanerLine(job) ||
+            (job.twoCleaners
+              ? 'Team job — needs 2 cleaners'
+              : null);
+          return (
+            <article
+              key={job.id}
+              className="bg-white border rounded-lg shadow-sm p-4 md:p-5"
+            >
+              <div className="md:flex md:items-start md:justify-between md:gap-6">
+                {/* LEFT content (flex-1 keeps width as content grows) */}
+                <div className="flex-1 space-y-3">
+                  <div>
+                    <h3 className="text-base font-semibold text-gray-900">
+                      {job.customerName || 'Customer'}
+                    </h3>
+                    <div className="text-sm text-gray-600 mt-1">
+                      {job.displayAddress}
+                    </div>
+                    {job.customerPhone && (
+                      <div className="text-sm text-gray-700 mt-1">
+                        {job.customerPhone}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
+                    <span className="inline-flex items-center gap-2 px-2 py-1 rounded border border-gray-200">
+                      <strong className="text-gray-800">
+                        {formatUKDate(job.date)}
+                      </strong>
+                      <span>•</span>
+                      <span>{job.displayTime}</span>
+                    </span>
+                  </div>
+
+                  {teamNote && (
+                    <div className="text-xs text-amber-700 bg-amber-50 inline-block px-2 py-1 rounded border border-amber-200">
+                      {teamNote}
+                    </div>
+                  )}
+
+                  <div className="text-sm font-semibold text-blue-700">
+                    {payText(job)}
+                  </div>
+                </div>
+
+                {/* RIGHT actions (auto width, small balanced gap) */}
+                <div className="mt-3 md:mt-0 flex-shrink-0 flex flex-col items-end gap-2 min-w-[180px]">
+                  {/* mini tags above buttons, right-aligned */}
+                  <div className="flex items-center gap-2">
+                    {job.twoCleaners && <Tag>2 cleaners</Tag>}
+                    <Tag>{hoursTag(job)}</Tag>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => assignToMe(job.id)}
+                      className="bg-[#0071bc] text-white px-3 py-2 rounded-md hover:opacity-95 text-sm"
+                    >
+                      Assign to me
+                    </button>
+                    <button
+                      onClick={() => setViewJob(job)}
+                      className="rounded-md border px-3 py-2 text-gray-800 hover:bg-gray-50 text-sm"
+                    >
+                      View
+                    </button>
+                  </div>
+                </div>
               </div>
-              <button
-                className="cursor-pointer rounded-md px-2 py-1 text-sm text-gray-700 hover:bg-gray-100"
-                onClick={() => setViewJob(null)}
-              >
-                Close
-              </button>
+            </article>
+          );
+        })
+      )}
+    </div>
+  </section>
+
+  {/* MY ASSIGNED */}
+  <section>
+    <h2 className="text-xl font-semibold mb-4 text-gray-800">
+      My Assigned Jobs
+    </h2>
+    <div className="space-y-4">
+      {myActiveJobs.length === 0 ? (
+        <p className="text-gray-500">You have no assigned jobs.</p>
+      ) : (
+        myActiveJobs.map((job) => {
+          const teamNote = twoCleanerLine(job);
+          const isConfirmed = confirmedJobs.includes(job.id);
+          return (
+            <article
+              key={job.id}
+              className="bg-white rounded-2xl shadow p-4 md:p-5 border border-gray-100"
+              style={{
+                borderLeftWidth: 6,
+                borderLeftColor: isConfirmed
+                  ? '#16a34a'
+                  : '#f59e0b',
+              }}
+            >
+              <div className="md:flex md:items-start md:justify-between md:gap-6">
+                {/* LEFT content */}
+                <div className="flex-1 space-y-3">
+                  <div>
+                    <h3 className="text-base font-semibold text-gray-900">
+                      {job.customerName || 'Customer'}
+                    </h3>
+                    <div className="text-sm text-gray-600 mt-1">
+                      {job.displayAddress}
+                    </div>
+                    {job.customerPhone && (
+                      <div className="text-sm text-gray-700 mt-1">
+                        {job.customerPhone}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
+                    <span className="inline-flex items-center gap-2 px-2 py-1 rounded border border-gray-200">
+                      <strong className="text-gray-800">
+                        {formatUKDate(job.date)}
+                      </strong>
+                      <span>•</span>
+                      <span>{job.displayTime}</span>
+                    </span>
+                  </div>
+
+                  {teamNote && (
+                    <div className="text-xs text-amber-700 bg-amber-50 inline-block px-2 py-1 rounded border border-amber-200">
+                      {teamNote}
+                    </div>
+                  )}
+
+                  <div className="text-sm font-semibold text-blue-700">
+                    {payText(job)}
+                  </div>
+                </div>
+
+                {/* RIGHT actions */}
+                <div className="mt-3 md:mt-0 flex-shrink-0 flex flex-col items-end gap-2 min-w-[180px]">
+                  {/* mini tags above buttons */}
+                  <div className="flex items-center gap-2">
+                    {job.twoCleaners && <Tag>2 cleaners</Tag>}
+                    <Tag>{hoursTag(job)}</Tag>
+                    {isConfirmed && (
+                      <span className="px-2 py-1 rounded bg-green-50 border border-green-200 text-xs text-green-700">
+                        Confirmed
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => downloadChecklist(job)}
+                      className="bg-[#0071bc] text-white px-3 py-2 rounded-md hover:opacity-95 text-sm"
+                    >
+                      Checklist
+                    </button>
+                    {!isConfirmed && (
+                      <button
+                        onClick={() => confirmBooking(job)}
+                        className="bg-green-600 text-white px-3 py-2 rounded-md hover:opacity-95 text-sm"
+                      >
+                        Confirm
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setViewJob(job)}
+                      className="rounded-md border px-3 py-2 text-gray-800 hover:bg-gray-50 text-sm"
+                    >
+                      View
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </article>
+          );
+        })
+      )}
+    </div>
+  </section>
+
+  {/* COMPLETED JOBS */}
+  <section>
+    <h2 className="text-xl font-semibold mb-4 text-gray-800">
+      Completed Jobs
+    </h2>
+    <div className="space-y-4">
+      {myCompletedJobs.length === 0 ? (
+        <p className="text-gray-500">You have no completed jobs yet.</p>
+      ) : (
+        myCompletedJobs.map((job) => {
+          const teamNote = twoCleanerLine(job);
+          return (
+            <article
+              key={job.id}
+              className="bg-white rounded-2xl shadow p-4 md:p-5 border border-gray-100"
+              style={{
+                borderLeftWidth: 6,
+                borderLeftColor: '#9ca3af', // gray
+              }}
+            >
+              <div className="md:flex md:items-start md:justify-between md:gap-6">
+                {/* LEFT content */}
+                <div className="flex-1 space-y-3">
+                  <div>
+                    <h3 className="text-base font-semibold text-gray-900">
+                      {job.customerName || 'Customer'}
+                    </h3>
+                    <div className="text-sm text-gray-600 mt-1">
+                      {job.displayAddress}
+                    </div>
+                    {job.customerPhone && (
+                      <div className="text-sm text-gray-700 mt-1">
+                        {job.customerPhone}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
+                    <span className="inline-flex items-center gap-2 px-2 py-1 rounded border border-gray-200">
+                      <strong className="text-gray-800">
+                        {formatUKDate(job.date)}
+                      </strong>
+                      <span>•</span>
+                      <span>{job.displayTime}</span>
+                    </span>
+                  </div>
+
+                  {teamNote && (
+                    <div className="text-xs text-amber-700 bg-amber-50 inline-block px-2 py-1 rounded border border-amber-200">
+                      {teamNote}
+                    </div>
+                  )}
+
+                  <div className="text-sm font-semibold text-blue-700">
+                    {payText(job)}
+                  </div>
+                </div>
+
+                {/* RIGHT actions */}
+                <div className="mt-3 md:mt-0 flex-shrink-0 flex flex-col items-end gap-2 min-w-[180px]">
+                  <div className="flex items-center gap-2">
+                    {job.twoCleaners && <Tag>2 cleaners</Tag>}
+                    <Tag>{hoursTag(job)}</Tag>
+                    <span className="px-2 py-1 rounded bg-gray-50 border border-gray-200 text-xs text-gray-700">
+                      Completed
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => downloadChecklist(job)}
+                      className="bg-[#0071bc] text-white px-3 py-2 rounded-md hover:opacity-95 text-sm"
+                    >
+                      Checklist
+                    </button>
+                    <button
+                      onClick={() => setViewJob(job)}
+                      className="rounded-md border px-3 py-2 text-gray-800 hover:bg-gray-50 text-sm"
+                    >
+                      View
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </article>
+          );
+        })
+      )}
+    </div>
+  </section>
+
+  {/* VIEW JOB MODAL (updated rooms display) */}
+  {viewJob && (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-2xl rounded-xl bg-white p-4 shadow-xl overflow-auto max-h-[85vh]">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="text-lg font-semibold text-gray-900">
+            {viewJob.customerName || 'Customer'}
+          </div>
+          <button
+            className="cursor-pointer rounded-md px-2 py-1 text-sm text-gray-700 hover:bg-gray-100"
+            onClick={() => setViewJob(null)}
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-800">
+          <div>
+            <div className="text-sm text-gray-600">Contact</div>
+            <div className="text-sm text-gray-900">
+              {viewJob.customerPhone || '—'}
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-800">
-              <div>
-                <div className="text-sm text-gray-600">Contact</div>
-                <div className="text-sm text-gray-900">
-                  {viewJob.customerPhone || '—'}
-                </div>
+            <div className="text-sm text-gray-600 mt-3">Address</div>
+            <div className="text-sm text-gray-900">
+              {typeof viewJob.address === 'string'
+                ? viewJob.address
+                : [
+                    viewJob.address?.line1,
+                    viewJob.address?.line2,
+                    viewJob.address?.town,
+                    viewJob.address?.county,
+                    viewJob.address?.postcode,
+                  ]
+                    .filter(Boolean)
+                    .join(', ')}
+            </div>
 
-                <div className="text-sm text-gray-600 mt-3">Address</div>
-                <div className="text-sm text-gray-900">
-                  {typeof viewJob.address === 'string'
-                    ? viewJob.address
-                    : [
-                        viewJob.address?.line1,
-                        viewJob.address?.line2,
-                        viewJob.address?.town,
-                        viewJob.address?.county,
-                        viewJob.address?.postcode,
-                      ]
-                        .filter(Boolean)
-                        .join(', ')}
-                </div>
-
-                <div className="text-sm text-gray-600 mt-3">
-                  Rooms / Areas
-                </div>
-                <div className="text-sm text-gray-900">
-                  {(() => {
-                    // Prefer new booking-builder summaries (roomSummaries)
-                    if (
-                      Array.isArray(viewJob.roomSummaries) &&
-                      viewJob.roomSummaries.length > 0
-                    ) {
-                      const rows = viewJob.roomSummaries
-                        .map((r, idx) => {
-                          const count = Number(r.count ?? 0);
-                          if (!count) return null;
-
-                          const label =
-                            r.label ||
-                            labelRoomType(r.typeId);
-
-                          const sizeNames = Array.isArray(r.sizes)
-                            ? r.sizes
-                                .map((sid) => {
-                                  const key = (sid || '')
-                                    .toLowerCase();
-                                  return (
-                                    SIZE_LABELS[key] || sid
-                                  );
-                                })
-                                .filter(Boolean)
-                            : [];
-
-                          const rightText =
-                            sizeNames.length > 0
-                              ? `${count} room${
-                                  count > 1 ? 's' : ''
-                                } (${sizeNames.join(', ')})`
-                              : `${count} room${
-                                  count > 1 ? 's' : ''
-                                }`;
-
-                          return (
-                            <div
-                              key={idx}
-                              className="flex items-baseline justify-between gap-3"
-                            >
-                              <span className="text-sm text-gray-900">
-                                {label}
-                              </span>
-                              <span className="text-xs text-gray-600 whitespace-nowrap">
-                                {rightText}
-                              </span>
-                            </div>
-                          );
-                        })
-                        .filter(Boolean);
-
-                      if (rows.length > 0) {
-                        return (
-                          <div className="space-y-1">
-                            {rows}
-                          </div>
-                        );
-                      }
-                    }
-
-                    // Prefer structured roomSelections (new format) if no roomSummaries
-                    if (
-                      Array.isArray(viewJob.roomSelections) &&
-                      viewJob.roomSelections.length > 0
-                    ) {
-                      const items = viewJob.roomSelections
-                        .map((r, idx) => {
-                          const count = Number(r.count ?? 0);
-                          if (!count) return null;
-                          const typeLabel = labelRoomType(r.typeId);
-                          const sizeKey = (r.sizeId || '').toLowerCase();
-                          const sizeLabel = SIZE_LABELS[sizeKey] || '';
-                          return (
-                            <li key={idx}>
-                              {count}× {typeLabel}
-                              {sizeLabel ? ` (${sizeLabel})` : ''}
-                            </li>
-                          );
-                        })
-                        .filter(Boolean);
-
-                      if (items.length > 0) {
-                        return (
-                          <ul className="list-disc list-inside space-y-1">
-                            {items}
-                          </ul>
-                        );
-                      }
-                    }
-
-                    // Fallback: legacy home-style counts
-                    const b = parseCount(viewJob.bedrooms);
-                    const baths = parseCount(viewJob.bathrooms);
-                    const liv = parseCount(viewJob.livingRooms);
-                    const k = parseCount(viewJob.kitchens);
-                    const util = parseCount(viewJob.utilityRooms);
-
-                    const parts: string[] = [];
-                    if (b)
-                      parts.push(
-                        `${b} bedroom${b > 1 ? 's' : ''}`
-                      );
-                    if (liv)
-                      parts.push(
-                        `${liv} living room${liv > 1 ? 's' : ''}`
-                      );
-                    if (k)
-                      parts.push(
-                        `${k} kitchen${k > 1 ? 's' : ''}`
-                      );
-                    if (baths)
-                      parts.push(
-                        `${baths} bathroom${
-                          baths > 1 ? 's' : ''
-                        }`
-                      );
-                    if (util)
-                      parts.push(
-                        `${util} utility room${
-                          util > 1 ? 's' : ''
-                        }`
-                      );
-
-                    if (parts.length) {
-                      return (
-                        <ul className="list-disc list-inside space-y-1">
-                          {parts.map((p, i) => (
-                            <li key={i}>{p}</li>
-                          ))}
-                        </ul>
-                      );
-                    }
-
-                    if (Array.isArray(viewJob.additionalRooms)) {
-                      if (!viewJob.additionalRooms.length) return '—';
-                      return (
-                        <ul className="list-disc list-inside space-y-1">
-                          {viewJob.additionalRooms.map((r, i) => (
-                            <li key={i}>{r}</li>
-                          ))}
-                        </ul>
-                      );
-                    }
-
-                    return viewJob.additionalRooms ?? '—';
-                  })()}
-                </div>
-
-                {(() => {
-                  // For the new roomSummaries format we already show counts & sizes above, so don't repeat.
-                  if (
-                    Array.isArray(viewJob.roomSummaries) &&
-                    viewJob.roomSummaries.length > 0
-                  ) {
-                    return null;
-                  }
-
-                  // Structured summary for room sizes & toilets (roomSelections / office / toilets)
-                  if (
-                    Array.isArray(viewJob.roomSelections) &&
-                    viewJob.roomSelections.length > 0
-                  ) {
-                    const sizeCounts: Record<string, number> = {};
-                    for (const r of viewJob.roomSelections) {
-                      const key = (r.sizeId || '').toLowerCase();
+            <div className="text-sm text-gray-600 mt-3">
+              Rooms / Areas
+            </div>
+            <div className="text-sm text-gray-900">
+              {(() => {
+                // Prefer new booking-builder summaries (roomSummaries)
+                if (
+                  Array.isArray(viewJob.roomSummaries) &&
+                  viewJob.roomSummaries.length > 0
+                ) {
+                  const rows = viewJob.roomSummaries
+                    .map((r, idx) => {
                       const count = Number(r.count ?? 0);
-                      if (!key || !count) continue;
-                      sizeCounts[key] = (sizeCounts[key] || 0) + count;
-                    }
-                    const sizeParts = Object.entries(sizeCounts)
-                      .filter(
-                        ([k, v]) => v > 0 && SIZE_LABELS[k]
-                      )
-                      .map(
-                        ([k, v]) =>
-                          `${v} ${SIZE_LABELS[k]} room${
-                            v > 1 ? 's' : ''
-                          }`
+                      if (!count) return null;
+
+                      const label =
+                        r.label ||
+                        labelRoomType(r.typeId);
+
+                      const sizeNames = Array.isArray(r.sizes)
+                        ? r.sizes
+                            .map((sid) => {
+                              const key = (sid || '')
+                                .toLowerCase();
+                              return (
+                                SIZE_LABELS[key] || sid
+                              );
+                            })
+                            .filter(Boolean)
+                        : [];
+
+                      const rightText =
+                        sizeNames.length > 0
+                          ? `${count} room${
+                              count > 1 ? 's' : ''
+                            } (${sizeNames.join(', ')})`
+                          : `${count} room${
+                              count > 1 ? 's' : ''
+                            }`;
+
+                      return (
+                        <div
+                          key={idx}
+                          className="flex items-baseline justify-between gap-3"
+                        >
+                          <span className="text-sm text-gray-900">
+                            {label}
+                          </span>
+                          <span className="text-xs text-gray-600 whitespace-nowrap">
+                            {rightText}
+                          </span>
+                        </div>
                       );
+                    })
+                    .filter(Boolean);
 
-                    let totalCubicles =
-                      typeof viewJob.totalCubicles === 'number'
-                        ? viewJob.totalCubicles
-                        : 0;
-                    if (
-                      !totalCubicles &&
-                      Array.isArray(viewJob.toiletSelections)
-                    ) {
-                      totalCubicles = viewJob.toiletSelections.reduce(
-                        (sum, t) => sum + (Number(t.count ?? 0) || 0),
-                        0
-                      );
-                    }
-                    const toiletRooms =
-                      typeof viewJob.toiletRoomsCount === 'number'
-                        ? viewJob.toiletRoomsCount
-                        : 0;
-                    const toiletSizeKey = (
-                      viewJob.toiletSizeId || ''
-                    ).toLowerCase();
-                    const toiletSizeLabel =
-                      SIZE_LABELS[toiletSizeKey] || '';
-
-                    if (
-                      !sizeParts.length &&
-                      !totalCubicles &&
-                      !toiletRooms
-                    )
-                      return null;
-
+                  if (rows.length > 0) {
                     return (
-                      <div className="mt-2 text-xs text-gray-600">
-                        {sizeParts.length > 0 && (
-                          <>
-                            Room sizes:{' '}
-                            <span className="text-gray-900 text-sm">
-                              {sizeParts.join(' · ')}
-                            </span>
-                          </>
-                        )}
-                        {(totalCubicles || toiletRooms) && (
-                          <div className="mt-1">
-                            Toilets:{' '}
-                            <span className="text-gray-900 text-sm">
-                              {totalCubicles
-                                ? `${totalCubicles} cubicle${
-                                    totalCubicles === 1
-                                      ? ''
-                                      : 's'
-                                  }`
-                                : ''}
-                              {totalCubicles && toiletRooms ? ' in ' : ''}
-                              {toiletRooms
-                                ? `${toiletRooms} room${
-                                    toiletRooms === 1 ? '' : 's'
-                                  }`
-                                : ''}
-                              {toiletSizeLabel
-                                ? ` (${toiletSizeLabel})`
-                                : ''}
-                            </span>
-                          </div>
-                        )}
+                      <div className="space-y-1">
+                        {rows}
                       </div>
                     );
                   }
+                }
 
-                  const rooms = viewJob.office?.rooms;
-                  if (!Array.isArray(rooms) || rooms.length === 0)
-                    return null;
-                  const sizeCounts: Record<string, number> = {};
-                  for (const r of rooms) {
-                    const key = (r.sizeId || '').toLowerCase();
-                    if (!key) continue;
-                    sizeCounts[key] = (sizeCounts[key] || 0) + 1;
-                  }
-                  const sizeParts = Object.entries(sizeCounts)
-                    .filter(
-                      ([k, v]) =>
-                        v > 0 && SIZE_LABELS[k]
-                    )
-                    .map(
-                      ([k, v]) =>
-                        `${v} ${SIZE_LABELS[k]} room${
-                          v > 1 ? 's' : ''
-                        }`
+                // Prefer structured roomSelections (new format) if no roomSummaries
+                if (
+                  Array.isArray(viewJob.roomSelections) &&
+                  viewJob.roomSelections.length > 0
+                ) {
+                  const items = viewJob.roomSelections
+                    .map((r, idx) => {
+                      const count = Number(r.count ?? 0);
+                      if (!count) return null;
+                      const typeLabel = labelRoomType(r.typeId);
+                      const sizeKey = (r.sizeId || '').toLowerCase();
+                      const sizeLabel = SIZE_LABELS[sizeKey] || '';
+                      return (
+                        <li key={idx}>
+                          {count}× {typeLabel}
+                          {sizeLabel ? ` (${sizeLabel})` : ''}
+                        </li>
+                      );
+                    })
+                    .filter(Boolean);
+
+                  if (items.length > 0) {
+                    return (
+                      <ul className="list-disc list-inside space-y-1">
+                        {items}
+                      </ul>
                     );
-                  if (!sizeParts.length) return null;
-                  return (
-                    <div className="mt-2 text-xs text-gray-600">
-                      Room sizes:{' '}
-                      <span className="text-gray-900 text-sm">
-                        {sizeParts.join(' · ')}
-                      </span>
-                    </div>
+                  }
+                }
+
+                // Fallback: legacy home-style counts
+                const b = parseCount(viewJob.bedrooms);
+                const baths = parseCount(viewJob.bathrooms);
+                const liv = parseCount(viewJob.livingRooms);
+                const k = parseCount(viewJob.kitchens);
+                const util = parseCount(viewJob.utilityRooms);
+
+                const parts: string[] = [];
+                if (b)
+                  parts.push(
+                    `${b} bedroom${b > 1 ? 's' : ''}`
                   );
-                })()}
+                if (liv)
+                  parts.push(
+                    `${liv} living room${liv > 1 ? 's' : ''}`
+                  );
+                if (k)
+                  parts.push(
+                    `${k} kitchen${k > 1 ? 's' : ''}`
+                  );
+                if (baths)
+                  parts.push(
+                    `${baths} bathroom${
+                      baths > 1 ? 's' : ''
+                    }`
+                  );
+                if (util)
+                  parts.push(
+                    `${util} utility room${
+                      util > 1 ? 's' : ''
+                    }`
+                  );
 
-                <div className="text-sm text-gray-600 mt-3">
-                  Add-ons
-                </div>
-                <div className="text-sm text-gray-900">
-                  {Array.isArray(viewJob.addOns)
-                    ? viewJob.addOns.join(', ')
-                    : viewJob.addOns ?? 'None'}
-                </div>
+                if (parts.length) {
+                  return (
+                    <ul className="list-disc list-inside space-y-1">
+                      {parts.map((p, i) => (
+                        <li key={i}>{p}</li>
+                      ))}
+                    </ul>
+                  );
+                }
 
-                <div className="text-sm text-gray-600 mt-3">
-                  Notes / Additional Rooms
-                </div>
-                <div className="text-sm text-gray-900">
-                  {viewJob.additionalInfo?.trim()
-                    ? viewJob.additionalInfo
-                    : '—'}
-                </div>
-              </div>
+                if (Array.isArray(viewJob.additionalRooms)) {
+                  if (!viewJob.additionalRooms.length) return '—';
+                  return (
+                    <ul className="list-disc list-inside space-y-1">
+                      {viewJob.additionalRooms.map((r, i) => (
+                        <li key={i}>{r}</li>
+                      ))}
+                    </ul>
+                  );
+                }
 
-              <div>
-                <div className="text-sm text-gray-600">Date & Time</div>
-                <div className="text-sm text-gray-900">
-                  {formatUKDate(viewJob.date)} •{' '}
-                  {viewJob.displayTime ||
-                    viewJob.startTime ||
-                    '—'}
-                </div>
-
-                <div className="text-sm text-gray-600 mt-3">Service</div>
-                <div className="text-sm text-gray-900">
-                  {viewJob.serviceType || 'Cleaning Service'}
-                </div>
-
-                <div className="text-sm text-gray-600 mt-3">Team</div>
-                <div className="text-sm text-gray-900">
-                  {viewJob.twoCleaners
-                    ? twoCleanerLine(viewJob) ?? 'Two-cleaner job'
-                    : 'Single cleaner'}
-                </div>
-
-                <div className="text-sm text-gray-600 mt-3">
-                  Your Pay
-                </div>
-                <div className="text-sm text-gray-900">
-                  {(() => {
-                    const h = Number(viewJob.estimatedHours ?? 0) || 0;
-                    return h
-                      ? `${currency.format(h * staffRate)}`
-                      : '—';
-                  })()}
-                </div>
-              </div>
+                return viewJob.additionalRooms ?? '—';
+              })()}
             </div>
 
-            <div className="mt-4 text-right">
-              <button
-                onClick={() => setViewJob(null)}
-                className="rounded-md bg-[#0071bc] text-white px-3 py-2 hover:opacity-95"
-              >
-                Close
-              </button>
+            {(() => {
+              // For the new roomSummaries format we already show counts & sizes above, so don't repeat.
+              if (
+                Array.isArray(viewJob.roomSummaries) &&
+                viewJob.roomSummaries.length > 0
+              ) {
+                return null;
+              }
+
+              // Structured summary for room sizes & toilets (roomSelections / office / toilets)
+              if (
+                Array.isArray(viewJob.roomSelections) &&
+                viewJob.roomSelections.length > 0
+              ) {
+                const sizeCounts: Record<string, number> = {};
+                for (const r of viewJob.roomSelections) {
+                  const key = (r.sizeId || '').toLowerCase();
+                  const count = Number(r.count ?? 0);
+                  if (!key || !count) continue;
+                  sizeCounts[key] = (sizeCounts[key] || 0) + count;
+                }
+                const sizeParts = Object.entries(sizeCounts)
+                  .filter(
+                    ([k, v]) => v > 0 && SIZE_LABELS[k]
+                  )
+                  .map(
+                    ([k, v]) =>
+                      `${v} ${SIZE_LABELS[k]} room${
+                        v > 1 ? 's' : ''
+                      }`
+                  );
+
+                let totalCubicles =
+                  typeof viewJob.totalCubicles === 'number'
+                    ? viewJob.totalCubicles
+                    : 0;
+                if (
+                  !totalCubicles &&
+                  Array.isArray(viewJob.toiletSelections)
+                ) {
+                  totalCubicles = viewJob.toiletSelections.reduce(
+                    (sum, t) => sum + (Number(t.count ?? 0) || 0),
+                    0
+                  );
+                }
+                const toiletRooms =
+                  typeof viewJob.toiletRoomsCount === 'number'
+                    ? viewJob.toiletRoomsCount
+                    : 0;
+                const toiletSizeKey = (
+                  viewJob.toiletSizeId || ''
+                ).toLowerCase();
+                const toiletSizeLabel =
+                  SIZE_LABELS[toiletSizeKey] || '';
+
+                if (
+                  !sizeParts.length &&
+                  !totalCubicles &&
+                  !toiletRooms
+                )
+                  return null;
+
+                return (
+                  <div className="mt-2 text-xs text-gray-600">
+                    {sizeParts.length > 0 && (
+                      <>
+                        Room sizes:{' '}
+                        <span className="text-gray-900 text-sm">
+                          {sizeParts.join(' · ')}
+                        </span>
+                      </>
+                    )}
+                    {(totalCubicles || toiletRooms) && (
+                      <div className="mt-1">
+                        Toilets:{' '}
+                        <span className="text-gray-900 text-sm">
+                          {totalCubicles
+                            ? `${totalCubicles} cubicle${
+                                totalCubicles === 1
+                                  ? ''
+                                  : 's'
+                              }`
+                            : ''}
+                          {totalCubicles && toiletRooms ? ' in ' : ''}
+                          {toiletRooms
+                            ? `${toiletRooms} room${
+                                toiletRooms === 1 ? '' : 's'
+                              }`
+                            : ''}
+                          {toiletSizeLabel
+                            ? ` (${toiletSizeLabel})`
+                            : ''}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+
+              const rooms = viewJob.office?.rooms;
+              if (!Array.isArray(rooms) || rooms.length === 0)
+                return null;
+              const sizeCounts: Record<string, number> = {};
+              for (const r of rooms) {
+                const key = (r.sizeId || '').toLowerCase();
+                if (!key) continue;
+                sizeCounts[key] = (sizeCounts[key] || 0) + 1;
+              }
+              const sizeParts = Object.entries(sizeCounts)
+                .filter(
+                  ([k, v]) =>
+                    v > 0 && SIZE_LABELS[k]
+                )
+                .map(
+                  ([k, v]) =>
+                    `${v} ${SIZE_LABELS[k]} room${
+                      v > 1 ? 's' : ''
+                    }`
+                );
+              if (!sizeParts.length) return null;
+              return (
+                <div className="mt-2 text-xs text-gray-600">
+                  Room sizes:{' '}
+                  <span className="text-gray-900 text-sm">
+                    {sizeParts.join(' · ')}
+                  </span>
+                </div>
+              );
+            })()}
+
+            <div className="text-sm text-gray-600 mt-3">
+              Add-ons
+            </div>
+            <div className="text-sm text-gray-900">
+              {Array.isArray(viewJob.addOns)
+                ? viewJob.addOns.join(', ')
+                : viewJob.addOns ?? 'None'}
+            </div>
+
+            <div className="text-sm text-gray-600 mt-3">
+              Notes / Additional Rooms
+            </div>
+            <div className="text-sm text-gray-900">
+              {viewJob.additionalInfo?.trim()
+                ? viewJob.additionalInfo
+                : '—'}
+            </div>
+          </div>
+
+          <div>
+            <div className="text-sm text-gray-600">Date & Time</div>
+            <div className="text-sm text-gray-900">
+              {formatUKDate(viewJob.date)} •{' '}
+              {viewJob.displayTime ||
+                viewJob.startTime ||
+                '—'}
+            </div>
+
+            <div className="text-sm text-gray-600 mt-3">Service</div>
+            <div className="text-sm text-gray-900">
+              {viewJob.serviceType || 'Cleaning Service'}
+            </div>
+
+            <div className="text-sm text-gray-600 mt-3">Team</div>
+            <div className="text-sm text-gray-900">
+              {viewJob.twoCleaners
+                ? twoCleanerLine(viewJob) ?? 'Two-cleaner job'
+                : 'Single cleaner'}
+            </div>
+
+            <div className="text-sm text-gray-600 mt-3">
+              Your Pay
+            </div>
+            <div className="text-sm text-gray-900">
+              {(() => {
+                const h = Number(viewJob.estimatedHours ?? 0) || 0;
+                return h
+                  ? `${currency.format(h * staffRate)}`
+                  : '—';
+              })()}
             </div>
           </div>
         </div>
-      )}
 
-      <style jsx>{`
-        .step-panel {
-          animation-duration: 0.3s;
-          animation-timing-function: ease-out;
-          animation-fill-mode: both;
-        }
-        .step-forward {
-          animation-name: slide-in-right-fade;
-        }
-        .step-backward {
-          animation-name: slide-in-left-fade;
-        }
-        @keyframes slide-in-right-fade {
-          from {
-            opacity: 0;
-            transform: translateX(24px);
-          }
-          to {
-            opacity: 1;
-            transform: translateX(0);
-          }
-        }
-        @keyframes slide-in-left-fade {
-          from {
-            opacity: 0;
-            transform: translateX(-24px);
-          }
-          to {
-            opacity: 1;
-            transform: translateX(0);
-          }
-        }
-      `}</style>
+        <div className="mt-4 text-right">
+          <button
+            onClick={() => setViewJob(null)}
+            className="rounded-md bg-[#0071bc] text-white px-3 py-2 hover:opacity-95"
+          >
+            Close
+          </button>
+        </div>
+      </div>
     </div>
+  )}
+
+  <style jsx>{`
+    .step-panel {
+      animation-duration: 0.3s;
+      animation-timing-function: ease-out;
+      animation-fill-mode: both;
+    }
+    .step-forward {
+      animation-name: slide-in-right-fade;
+    }
+    .step-backward {
+      animation-name: slide-in-left-fade;
+    }
+    @keyframes slide-in-right-fade {
+      from {
+        opacity: 0;
+        transform: translateX(24px);
+      }
+      to {
+        opacity: 1;
+        transform: translateX(0);
+      }
+    }
+    @keyframes slide-in-left-fade {
+      from {
+        opacity: 0;
+        transform: translateX(-24px);
+      }
+      to {
+        opacity: 1;
+        transform: translateX(0);
+      }
+    }
+  `}</style>
+  </div>
   );
 }
