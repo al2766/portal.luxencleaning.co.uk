@@ -953,355 +953,392 @@ export default function Jobs() {
       alert(getErrorMessage(e) || 'Failed to confirm booking');
     }
   };
+// checklist PDF (staff pay + assigned cleaners)
+async function downloadChecklist(job: Job) {
+  const { jsPDF } = await import('jspdf');
 
-  // checklist PDF (staff pay + assigned cleaners)
-  async function downloadChecklist(job: Job) {
-    const { jsPDF } = await import('jspdf');
+  const A4_W = 595.28;
+  const A4_H = 841.89;
+  const M = 48;
 
-    const A4_W = 595.28;
-    const A4_H = 841.89;
-    const M = 48;
+  const BLUE = '#0a66b2';
 
-    const BLUE = '#0a66b2';
+  const BODY_SIZE = 8.8;
+  const LINE_STEP = 15.5;
+  const TITLE_SIZE = 13;
+  const SUBTITLE_SIZE = 10.2;
+  const MAIN_TITLE_SIZE = 21;
 
-    const BODY_SIZE = 8.8;
-    const LINE_STEP = 15.5;
-    const TITLE_SIZE = 13;
-    const SUBTITLE_SIZE = 10.2;
-    const MAIN_TITLE_SIZE = 21;
+  const HR_GAP = 22;
+  const TITLE_GAP = HR_GAP;
+  const SECTION_GAP = 12;
+  const ROW_GAP = 12;
 
-    const HR_GAP = 22;
-    const TITLE_GAP = HR_GAP;
-    const SECTION_GAP = 12;
-    const ROW_GAP = 12;
+  const BOX = 8;
 
-    const BOX = 8;
+  const STAFF_RATE = staffRate;
 
-    const STAFF_RATE = staffRate;
+  const money = new Intl.NumberFormat('en-GB', {
+    style: 'currency',
+    currency: 'GBP',
+    maximumFractionDigits: 2,
+  });
 
-    const money = new Intl.NumberFormat('en-GB', {
-      style: 'currency',
-      currency: 'GBP',
-      maximumFractionDigits: 2,
+  // Decide if this is an office clean checklist
+  const isOfficeChecklist =
+    (job.serviceType || '').toLowerCase().includes('office');
+
+  const fmtLongDate = (ymd: string) => {
+    const [yy, mm, dd] = (ymd || '').split('-').map(Number);
+    const dt = new Date(yy, (mm || 1) - 1, dd || 1);
+    return dt.toLocaleDateString('en-GB', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric',
+    });
+  };
+
+  const loadImage = (src: string) =>
+    new Promise<HTMLImageElement>((resolve, reject) => {
+      const im = new Image();
+      im.crossOrigin = 'anonymous';
+      im.onload = () => resolve(im);
+      im.onerror = reject;
+      im.src = src;
     });
 
-    const fmtLongDate = (ymd: string) => {
-      const [yy, mm, dd] = (ymd || '').split('-').map(Number);
-      const dt = new Date(yy, (mm || 1) - 1, dd || 1);
-      return dt.toLocaleDateString('en-GB', {
-        day: '2-digit',
-        month: 'long',
-        year: 'numeric',
-      });
-    };
+  const docPdf = new jsPDF({ unit: 'pt', format: 'a4' });
+  let y = M;
 
-    const loadImage = (src: string) =>
-      new Promise<HTMLImageElement>((resolve, reject) => {
-        const im = new Image();
-        im.crossOrigin = 'anonymous';
-        im.onload = () => resolve(im);
-        im.onerror = reject;
-        im.src = src;
-      });
+  const set = (
+    font = 'helvetica',
+    style: 'normal' | 'bold' | 'italic' = 'normal',
+    size = BODY_SIZE,
+    color = '#111'
+  ) => {
+    docPdf.setFont(font, style);
+    docPdf.setFontSize(size);
+    docPdf.setTextColor(color);
+  };
+  const hr = () => {
+    docPdf.setDrawColor('#cfd8e3');
+    docPdf.line(M, y, A4_W - M, y);
+  };
+  const split = (text: string, maxW: number) =>
+    docPdf.splitTextToSize(text, maxW);
 
-    const docPdf = new jsPDF({ unit: 'pt', format: 'a4' });
-    let y = M;
+  const logo = await loadImage('/logo.png');
+  const LOGO_H = 120;
+  const logoW = (logo.width / logo.height) * LOGO_H;
+  const headerCenterY = y + LOGO_H / 2;
 
-    const set = (
-      font = 'helvetica',
-      style: 'normal' | 'bold' | 'italic' = 'normal',
-      size = BODY_SIZE,
-      color = '#111'
-    ) => {
-      docPdf.setFont(font, style);
-      docPdf.setFontSize(size);
-      docPdf.setTextColor(color);
-    };
-    const hr = () => {
-      docPdf.setDrawColor('#cfd8e3');
-      docPdf.line(M, y, A4_W - M, y);
-    };
-    const split = (text: string, maxW: number) =>
-      docPdf.splitTextToSize(text, maxW);
+  docPdf.addImage(logo, 'PNG', M, y, logoW, LOGO_H);
 
-    const logo = await loadImage('/logo.png');
-    const LOGO_H = 120;
-    const logoW = (logo.width / logo.height) * LOGO_H;
-    const headerCenterY = y + LOGO_H / 2;
+  const titleX = M + logoW + 18;
+  set('helvetica', 'bold', MAIN_TITLE_SIZE, BLUE);
+  docPdf.text('LUXEN CLEANING', titleX, headerCenterY - 8);
+  set('helvetica', 'normal', SUBTITLE_SIZE, '#111');
+  docPdf.text(
+    isOfficeChecklist
+      ? 'Office Cleaning Checklist'
+      : 'Standard Home Cleaning Checklist',
+    titleX,
+    headerCenterY + 10
+  );
 
-    docPdf.addImage(logo, 'PNG', M, y, logoW, LOGO_H);
+  y += LOGO_H + 10;
+  hr();
+  y += HR_GAP;
 
-    const titleX = M + logoW + 18;
-    set('helvetica', 'bold', MAIN_TITLE_SIZE, BLUE);
-    docPdf.text('LUXEN CLEANING', titleX, headerCenterY - 8);
-    set('helvetica', 'normal', SUBTITLE_SIZE, '#111');
-    docPdf.text(
-      'Standard Home Cleaning Checklist',
-      titleX,
-      headerCenterY + 10
-    );
+  set('helvetica', 'bold', TITLE_SIZE, BLUE);
+  docPdf.text('Customer Details', M, y);
 
-    y += LOGO_H + 10;
-    hr();
-    y += HR_GAP;
+  const detailGap = 16;
+  const innerW = A4_W - 2 * M;
+  const leftW = innerW * 0.3;
+  const rightW = innerW * 0.7 - detailGap;
 
-    set('helvetica', 'bold', TITLE_SIZE, BLUE);
-    docPdf.text('Customer Details', M, y);
+  const L = M;
+  const R = M + leftW + detailGap;
 
-    const detailGap = 16;
-    const innerW = A4_W - 2 * M;
-    const leftW = innerW * 0.3;
-    const rightW = innerW * 0.7 - detailGap;
+  docPdf.text('Job Details', R, y);
+  y += TITLE_GAP;
 
-    const L = M;
-    const R = M + leftW + detailGap;
+  const kvInline = (
+    x: number,
+    yy: number,
+    label: string,
+    value: string | number | undefined,
+    width: number
+  ) => {
+    set('helvetica', 'normal', BODY_SIZE, '#111');
+    const wrapped = split(`${label}: ${value ?? '—'}`, width);
+    docPdf.text(wrapped, x, yy);
+    const lines = Array.isArray(wrapped) ? wrapped.length : 1;
+    return yy + Math.max(LINE_STEP, LINE_STEP * lines);
+  };
 
-    docPdf.text('Job Details', R, y);
-    y += TITLE_GAP;
+  const custName = job.customerName || 'Customer';
+  const addr =
+    typeof job.address === 'string'
+      ? job.address
+      : [
+          job.address?.line1,
+          job.address?.line2,
+          job.address?.town,
+          job.address?.county,
+          job.address?.postcode,
+        ]
+          .filter(Boolean)
+          .join(', ');
+  let yL = y;
+  yL = kvInline(L, yL, 'Customer', custName, leftW);
+  yL = kvInline(L, yL, 'Address', addr || '—', leftW);
+  yL = kvInline(L, yL, 'Phone', job.customerPhone || '—', leftW);
 
-    const kvInline = (
-      x: number,
-      yy: number,
-      label: string,
-      value: string | number | undefined,
-      width: number
-    ) => {
-      set('helvetica', 'normal', BODY_SIZE, '#111');
-      const wrapped = split(`${label}: ${value ?? '—'}`, width);
-      docPdf.text(wrapped, x, yy);
-      const lines = Array.isArray(wrapped) ? wrapped.length : 1;
-      return yy + Math.max(LINE_STEP, LINE_STEP * lines);
-    };
+  const showTime = job.displayTime || job.startTime || '—';
+  const hours = Number(job.estimatedHours ?? 0) || 0;
+  const pay = hours > 0 ? money.format(hours * STAFF_RATE) : '—';
+  const cleaners = getAssignedNames(job).join(', ') || '—';
 
-    const custName = job.customerName || 'Customer';
-    const addr =
-      typeof job.address === 'string'
-        ? job.address
-        : [
-            job.address?.line1,
-            job.address?.line2,
-            job.address?.town,
-            job.address?.county,
-            job.address?.postcode,
-          ]
-            .filter(Boolean)
+  // NEW: nicer rooms line using roomSummaries when present
+  let roomsLine: string;
+  if (Array.isArray(job.roomSummaries) && job.roomSummaries.length > 0) {
+    const segments = job.roomSummaries
+      .map((r) => {
+        const label = r.label || labelRoomType(r.typeId);
+        const sizes = Array.isArray(r.sizes) ? r.sizes : [];
+        const sizeCounts: Record<string, number> = {};
+        for (const sid of sizes) {
+          const key = (sid || '').toLowerCase();
+          if (!key) continue;
+          sizeCounts[key] = (sizeCounts[key] || 0) + 1;
+        }
+        const totalRooms = Number(r.count ?? sizes.length ?? 0) || 0;
+
+        if (!totalRooms) return null;
+
+        if (Object.keys(sizeCounts).length > 0) {
+          const sizeText = Object.entries(sizeCounts)
+            .map(([key, count]) => {
+              const sizeName = SIZE_LABELS[key] || key;
+              return `${count} ${sizeName}`;
+            })
             .join(', ');
-    let yL = y;
-    yL = kvInline(L, yL, 'Customer', custName, leftW);
-    yL = kvInline(L, yL, 'Address', addr || '—', leftW);
-    yL = kvInline(L, yL, 'Phone', job.customerPhone || '—', leftW);
-
-    const showTime =
-      job.displayTime || job.startTime || '—';
-    const hours = Number(job.estimatedHours ?? 0) || 0;
-    const pay = hours > 0 ? money.format(hours * STAFF_RATE) : '—';
-    const cleaners =
-      getAssignedNames(job).join(', ') || '—';
-
-    // NEW: nicer rooms line using roomSummaries when present
-    let roomsLine: string;
-    if (Array.isArray(job.roomSummaries) && job.roomSummaries.length > 0) {
-      const segments = job.roomSummaries
-        .map((r) => {
-          const label =
-            r.label || labelRoomType(r.typeId);
-          const sizes = Array.isArray(r.sizes) ? r.sizes : [];
-          const sizeCounts: Record<string, number> = {};
-          for (const sid of sizes) {
-            const key = (sid || '').toLowerCase();
-            if (!key) continue;
-            sizeCounts[key] = (sizeCounts[key] || 0) + 1;
-          }
-          const totalRooms =
-            Number(r.count ?? sizes.length ?? 0) || 0;
-
-          if (!totalRooms) return null;
-
-          if (Object.keys(sizeCounts).length > 0) {
-            const sizeText = Object.entries(sizeCounts)
-              .map(([key, count]) => {
-                const sizeName =
-                  SIZE_LABELS[key] || key;
-                return `${count} ${sizeName}`;
-              })
-              .join(', ');
-            return `${label}: ${totalRooms} room${
-              totalRooms > 1 ? 's' : ''
-            } (${sizeText})`;
-          }
-
           return `${label}: ${totalRooms} room${
             totalRooms > 1 ? 's' : ''
-          }`;
-        })
-        .filter(Boolean) as string[];
+          } (${sizeText})`;
+        }
 
-      roomsLine = segments.length
-        ? segments.join(' · ')
-        : 'Not set';
-    } else {
-      const b = parseCount(job.bedrooms);
-      const baths = parseCount(job.bathrooms);
-      const liv = parseCount(job.livingRooms);
-      const k = parseCount(job.kitchens);
+        return `${label}: ${totalRooms} room${totalRooms > 1 ? 's' : ''}`;
+      })
+      .filter(Boolean) as string[];
 
-      const parts: string[] = [];
-      if (b) parts.push(`${b} bed${b > 1 ? 's' : ''}`);
-      if (baths)
-        parts.push(
-          `${baths} bath${baths > 1 ? 's' : ''}`
-        );
-      if (liv) parts.push(`${liv} living`);
-      if (k)
-        parts.push(
-          `${k} kitchen${k > 1 ? 's' : ''}`
-        );
+    roomsLine = segments.length ? segments.join(' · ') : 'Not set';
+  } else {
+    const b = parseCount(job.bedrooms);
+    const baths = parseCount(job.bathrooms);
+    const liv = parseCount(job.livingRooms);
+    const k = parseCount(job.kitchens);
 
-      roomsLine = parts.length ? parts.join(' · ') : 'Not set';
-    }
+    const parts: string[] = [];
+    if (b) parts.push(`${b} bed${b > 1 ? 's' : ''}`);
+    if (baths) parts.push(`${baths} bath${baths > 1 ? 's' : ''}`);
+    if (liv) parts.push(`${liv} living`);
+    if (k) parts.push(`${k} kitchen${k > 1 ? 's' : ''}`);
 
-    let yR = y;
-    yR = kvInline(
-      R,
-      yR,
-      'Date',
-      job.date ? fmtLongDate(job.date) : '—',
-      rightW
-    );
-    yR = kvInline(R, yR, 'Time', showTime, rightW);
-    yR = kvInline(
-      R,
-      yR,
-      'Service',
-      job.serviceType || 'Cleaning Service',
-      rightW
-    );
-    yR = kvInline(R, yR, 'Rooms', roomsLine, rightW);
-    yR = kvInline(R, yR, 'Cleanliness', job.cleanliness || '—', rightW);
-    yR = kvInline(
-      R,
-      yR,
-      'Estimated Hours',
-      hours ? String(hours) : '—',
-      rightW
-    );
-    yR = kvInline(
-      R,
-      yR,
-      'Assigned Cleaners',
-      cleaners,
-      rightW
-    );
-    yR = kvInline(R, yR, 'Your Pay', pay, rightW);
-
-    y = Math.max(yL, yR) + 8;
-    hr();
-    y += HR_GAP;
-
-    const checkboxLine = (
-      x: number,
-      yy: number,
-      text: string,
-      width: number
-    ) => {
-      const rectY = yy - BOX + BODY_SIZE * 0.48;
-      docPdf.setDrawColor(0);
-      docPdf.setFillColor(255, 255, 255);
-      docPdf.rect(x, rectY, BOX, BOX, 'FD');
-
-      set('helvetica', 'normal', BODY_SIZE, '#111');
-      const wrapped = split(text, width - (BOX + 12));
-      docPdf.text(wrapped, x + BOX + 7, yy);
-
-      const lines = Array.isArray(wrapped) ? wrapped.length : 1;
-      return yy + Math.max(LINE_STEP, LINE_STEP * lines);
-    };
-
-    const section = (
-      title: string,
-      items: string[],
-      x: number,
-      yy: number,
-      width: number
-    ) => {
-      set('helvetica', 'bold', TITLE_SIZE, BLUE);
-      docPdf.text(title, x, yy);
-      yy += TITLE_GAP;
-      let cur = yy;
-      for (const it of items) cur = checkboxLine(x, cur, it, width);
-      return cur + SECTION_GAP;
-    };
-
-    const colGap2 = 28;
-    const colW2 = (A4_W - M * 2 - colGap2) / 2;
-
-    const entry_items = [
-      'Put on shoe covers (if required)',
-      'Knock, greet politely, confirm job scope & time',
-      'Place equipment neatly by the entrance',
-      'Tidy shoes/coats if asked; clear floor area',
-      'Vacuum/mop floors; wipe skirting boards and door handles',
-    ];
-    const kitchen_items = [
-      'Load/unload dishwasher if asked; wash remaining dishes',
-      'Wipe worktops, splashbacks, cupboard doors and handles',
-      'Clean hob and front of oven; wipe appliances (kettle, microwave)',
-      'Empty bins & replace liners; take rubbish out (if instructed)',
-      'Vacuum/mop floor; leave sink & taps shining',
-    ];
-    const bathroom_items = [
-      'Spray & clean toilet (top to bottom) and base',
-      'Clean sink, taps, plugholes & polish mirrors',
-      'Wipe shower/bath, screen/tiles; rinse & squeegee',
-      'Wipe light switches, door handles & skirting',
-      'Vacuum/mop floor; leave surfaces dry & tidy',
-    ];
-    const bedroom_items = [
-      'Tidy surfaces; dust reachable areas and skirting',
-      'Make bed/change bedding if clean bedding provided',
-      'Wipe mirrors & glass surfaces',
-      'Empty small bins (if present)',
-      'Vacuum/mop floors; check under bed reachable area',
-    ];
-    const living_items = [
-      'Tidy and dust surfaces, TV stand, shelves (reachable)',
-      'Wipe coffee table and reachable glass',
-      'Fluff cushions & fold throws neatly',
-      'Wipe light switches, door handles & skirting',
-      'Vacuum/mop floors and visible edges',
-    ];
-    const finish_items = [
-      'Walk-through with customer (if present) & confirm satisfaction',
-      'Check lights off, windows closed (unless instructed)',
-      'Take rubbish/recycling out if instructed',
-      'Pack equipment, leave entry tidy',
-      'Note any damages/issues in app/notes',
-    ];
-
-    let yL1 = section('Entry & Hallway', entry_items, M, y, colW2);
-    let yR1 = section('Kitchen', kitchen_items, M + colW2 + colGap2, y, colW2);
-    y = Math.max(yL1, yR1) + ROW_GAP;
-
-    let yL2 = section('Bathrooms', bathroom_items, M, y, colW2);
-    let yR2 = section('Bedrooms', bedroom_items, M + colW2 + colGap2, y, colW2);
-    y = Math.max(yL2, yR2) + ROW_GAP;
-
-    let yL3 = section('Living Areas', living_items, M, y, colW2);
-    let yR3 = section('Finishing Up', finish_items, M + colW2 + colGap2, y, colW2);
-    y = Math.max(yL3, yR3);
-
-    const footerY = Math.min(A4_H - 22, y + 20);
-    set('helvetica', 'italic', 9, '#555');
-    docPdf.text('Thank you for choosing Luxen Cleaning.', M, footerY);
-
-    const pc =
-      typeof job.address === 'string'
-        ? ''
-        : job.address?.postcode ?? '';
-    docPdf.save(
-      `${job.customerName ?? 'Customer'} (${pc}) Checklist.pdf`
-    );
+    roomsLine = parts.length ? parts.join(' · ') : 'Not set';
   }
+
+  let yR = y;
+  yR = kvInline(
+    R,
+    yR,
+    'Date',
+    job.date ? fmtLongDate(job.date) : '—',
+    rightW
+  );
+  yR = kvInline(R, yR, 'Time', showTime, rightW);
+  yR = kvInline(
+    R,
+    yR,
+    'Service',
+    job.serviceType || 'Cleaning Service',
+    rightW
+  );
+  yR = kvInline(R, yR, 'Rooms', roomsLine, rightW);
+  yR = kvInline(R, yR, 'Cleanliness', job.cleanliness || '—', rightW);
+  yR = kvInline(
+    R,
+    yR,
+    'Estimated Hours',
+    hours ? String(hours) : '—',
+    rightW
+  );
+  yR = kvInline(R, yR, 'Assigned Cleaners', cleaners, rightW);
+  yR = kvInline(R, yR, 'Your Pay', pay, rightW);
+
+  y = Math.max(yL, yR) + 8;
+  hr();
+  y += HR_GAP;
+
+  const checkboxLine = (
+    x: number,
+    yy: number,
+    text: string,
+    width: number
+  ) => {
+    const rectY = yy - BOX + BODY_SIZE * 0.48;
+    docPdf.setDrawColor(0);
+    docPdf.setFillColor(255, 255, 255);
+    docPdf.rect(x, rectY, BOX, BOX, 'FD');
+
+    set('helvetica', 'normal', BODY_SIZE, '#111');
+    const wrapped = split(text, width - (BOX + 12));
+    docPdf.text(wrapped, x + BOX + 7, yy);
+
+    const lines = Array.isArray(wrapped) ? wrapped.length : 1;
+    return yy + Math.max(LINE_STEP, LINE_STEP * lines);
+  };
+
+  const section = (
+    title: string,
+    items: string[],
+    x: number,
+    yy: number,
+    width: number
+  ) => {
+    set('helvetica', 'bold', TITLE_SIZE, BLUE);
+    docPdf.text(title, x, yy);
+    yy += TITLE_GAP;
+    let cur = yy;
+    for (const it of items) cur = checkboxLine(x, cur, it, width);
+    return cur + SECTION_GAP;
+  };
+
+  const colGap2 = 28;
+  const colW2 = (A4_W - M * 2 - colGap2) / 2;
+
+  // HOME vs OFFICE checklist items & section titles
+  const entry_items = isOfficeChecklist
+    ? [
+        'Sign in on site if required and wear ID / PPE',
+        'Tidy entrance and reception desk surfaces',
+        'Clean glass doors and high-touch points (handles, rails, buzzers)',
+        'Spot clean internal doors, light switches and skirting',
+        'Vacuum/mop reception and entrance floors',
+      ]
+    : [
+        'Put on shoe covers (if required)',
+        'Knock, greet politely, confirm job scope & time',
+        'Place equipment neatly by the entrance',
+        'Tidy shoes/coats if asked; clear floor area',
+        'Vacuum/mop floors; wipe skirting boards and door handles',
+      ];
+  const kitchen_items = isOfficeChecklist
+    ? [
+        'Wash up or load/unload dishwasher as requested',
+        'Wipe worktops, cupboard fronts and handles in kitchen/break area',
+        'Clean fronts of appliances (microwave, fridge, kettles, vending)',
+        'Empty food and recycling bins; replace liners',
+        'Vacuum/mop kitchen/break area floors',
+      ]
+    : [
+        'Load/unload dishwasher if asked; wash remaining dishes',
+        'Wipe worktops, splashbacks, cupboard doors and handles',
+        'Clean hob and front of oven; wipe appliances (kettle, microwave)',
+        'Empty bins & replace liners; take rubbish out (if instructed)',
+        'Vacuum/mop floor; leave sink & taps shining',
+      ];
+  const bathroom_items = isOfficeChecklist
+    ? [
+        'Clean and disinfect toilets, urinals and fittings (top to bottom)',
+        'Clean sinks, taps, splashbacks and polish mirrors',
+        'Wipe and disinfect cubicle doors, partitions & touchpoints',
+        'Empty sanitary and general bins; replace liners if required',
+        'Mop floors with appropriate disinfectant; leave dry where possible',
+      ]
+    : [
+        'Spray & clean toilet (top to bottom) and base',
+        'Clean sink, taps, plugholes & polish mirrors',
+        'Wipe shower/bath, screen/tiles; rinse & squeegee',
+        'Wipe light switches, door handles & skirting',
+        'Vacuum/mop floor; leave surfaces dry & tidy',
+      ];
+  const bedroom_items = isOfficeChecklist
+    ? [
+        'Tidy desks and tables (move light items only)',
+        'Dust and wipe reachable surfaces, window sills and ledges',
+        'Straighten chairs and meeting room layouts',
+        'Empty paper bins; replace liners where needed',
+        'Vacuum/mop floors including under desks where reachable',
+      ]
+    : [
+        'Tidy surfaces; dust reachable areas and skirting',
+        'Make bed/change bedding if clean bedding provided',
+        'Wipe mirrors & glass surfaces',
+        'Empty small bins (if present)',
+        'Vacuum/mop floors; check under bed reachable area',
+      ];
+  const living_items = isOfficeChecklist
+    ? [
+        'Dust handrails, skirting and ledges in corridors and stairs',
+        'Spot clean walls and high-touch points (switches, door plates)',
+        'Check and tidy waiting/seating areas',
+        'Empty corridor/landing bins if present',
+        'Vacuum/mop corridors and stair treads/landings',
+      ]
+    : [
+        'Tidy and dust surfaces, TV stand, shelves (reachable)',
+        'Wipe coffee table and reachable glass',
+        'Fluff cushions & fold throws neatly',
+        'Wipe light switches, door handles & skirting',
+        'Vacuum/mop floors and visible edges',
+      ];
+  const finish_items = isOfficeChecklist
+    ? [
+        'Quick walk-through of key areas; check nothing missed',
+        'Ensure bins are re-lined and waste taken to agreed point',
+        'Check windows are closed and internal doors left as instructed',
+        'Turn off lights (unless instructed otherwise) and secure alarm if required',
+        'Return keys/fobs to agreed location and sign out if required',
+      ]
+    : [
+        'Walk-through with customer (if present) & confirm satisfaction',
+        'Check lights off, windows closed (unless instructed)',
+        'Take rubbish/recycling out if instructed',
+        'Pack equipment, leave entry tidy',
+        'Note any damages/issues in app/notes',
+      ];
+
+  const entryTitle = isOfficeChecklist ? 'Reception & Entrance' : 'Entry & Hallway';
+  const kitchenTitle = isOfficeChecklist ? 'Kitchens / Break Areas' : 'Kitchen';
+  const bathroomTitle = isOfficeChecklist ? 'Toilets & Washrooms' : 'Bathrooms';
+  const bedroomTitle = isOfficeChecklist ? 'Offices & Meeting Rooms' : 'Bedrooms';
+  const livingTitle = isOfficeChecklist ? 'Corridors & Shared Areas' : 'Living Areas';
+  const finishTitle = isOfficeChecklist ? 'Closing Checks' : 'Finishing Up';
+
+  let yL1 = section(entryTitle, entry_items, M, y, colW2);
+  let yR1 = section(kitchenTitle, kitchen_items, M + colW2 + colGap2, y, colW2);
+  y = Math.max(yL1, yR1) + ROW_GAP;
+
+  let yL2 = section(bathroomTitle, bathroom_items, M, y, colW2);
+  let yR2 = section(bedroomTitle, bedroom_items, M + colW2 + colGap2, y, colW2);
+  y = Math.max(yL2, yR2) + ROW_GAP;
+
+  let yL3 = section(livingTitle, living_items, M, y, colW2);
+  let yR3 = section(finishTitle, finish_items, M + colW2 + colGap2, y, colW2);
+  y = Math.max(yL3, yR3);
+
+  const footerY = Math.min(A4_H - 22, y + 20);
+  set('helvetica', 'italic', 9, '#555');
+  docPdf.text('Thank you for choosing Luxen Cleaning.', M, footerY);
+
+  const pc =
+    typeof job.address === 'string' ? '' : job.address?.postcode ?? '';
+  docPdf.save(`${job.customerName ?? 'Customer'} (${pc}) Checklist.pdf`);
+}
+
 
   const inputCls =
     'w-full h-11 px-3 rounded-lg border border-gray-300 bg-white text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#0071bc]/30 focus:border-[#0071bc]';
