@@ -72,6 +72,19 @@ const labelRoomType = (typeId?: string | null): string => {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 };
 
+function formatShortDate(ymd?: string | null): string | null {
+  if (!ymd) return null;
+  const [y, m, d] = ymd.split('-').map(Number);
+  if (!y || !m || !d) return ymd;
+  return new Date(y, m - 1, d)
+    .toLocaleDateString('en-GB', {
+      day: '2-digit',
+      month: 'short',
+      year: '2-digit',
+    })
+    .toUpperCase(); // e.g. 29 NOV 25
+}
+
 const MapContainer = dynamic<MapContainerProps>(
   () => import('react-leaflet').then((m) => m.MapContainer),
   { ssr: false }
@@ -846,6 +859,7 @@ export default function Jobs() {
               customerName: data.customerName || '',
               postcode,
               date: data.date || '',
+              prettyDate: formatShortDate(data?.date ?? null),
               time,
               estimatedHours,
               staffPay,
@@ -931,6 +945,7 @@ export default function Jobs() {
             postcode,
             rawStaffPhone,
             date: job.date || '',
+            prettyDate: formatShortDate(job?.date ?? null),
             time: job.displayTime || job.startTime || '',
             estimatedHours,
             staffPay,
