@@ -421,14 +421,189 @@ export default function Jobs() {
       const staff = snap.exists()
         ? (snap.data() as Record<string, unknown>)
         : {};
-      const pc = String(staff?.['homePostcode'] ?? '').trim();
-      setNeedsProfile(!pc);
+  
+      // 1) Hydrate local state from whatever is in the doc
+      const pc = String(staff['homePostcode'] ?? '').trim();
+      setHomePostcode(pc);
+  
+      const radiusRaw = staff['radiusMiles'];
+      const radiusNum =
+        typeof radiusRaw === 'number' ? radiusRaw : Number(radiusRaw);
+      setRadiusMiles(Number.isFinite(radiusNum) ? radiusNum : 10);
+  
+      const noticeRaw = staff['minNoticeHours'];
+      const noticeNum =
+        typeof noticeRaw === 'number' ? noticeRaw : Number(noticeRaw);
+      // if it's missing or invalid, keep it NaN so the step validation complains
+      setMinNoticeHours(
+        noticeRaw === null || noticeRaw === undefined || !Number.isFinite(noticeNum)
+          ? (NaN as unknown as number)
+          : noticeNum
+      );
+  
+      const bufferRaw = staff['travelBufferMins'];
+      const bufferNum =
+        typeof bufferRaw === 'number' ? bufferRaw : Number(bufferRaw);
+      setTravelBufferMins(Number.isFinite(bufferNum) ? bufferNum : 30);
+  
+      const availRaw = staff['availability'] as Record<string, any> | undefined;
+      if (availRaw && typeof availRaw === 'object') {
+        const nextAvail: Availability = { ...defaultAvailability };
+        (Object.keys(nextAvail) as DayName[]).forEach((Day) => {
+          const key = Day.toLowerCase();
+          const v = availRaw[key] as any;
+          if (v && typeof v === 'object') {
+            nextAvail[Day] = {
+              available: !!v.available,
+              from: v.startTime || v.from || nextAvail[Day].from,
+              to: v.endTime || v.to || nextAvail[Day].to,
+            };
+          }
+        });
+        setAvailability(nextAvail);
+      }
+  
+      setHasCar(
+        typeof staff['hasCar'] === 'boolean'
+          ? (staff['hasCar'] as boolean)
+          : null
+      );
+      setBringsSupplies(
+        typeof staff['bringsSupplies'] === 'boolean'
+          ? (staff['bringsSupplies'] as boolean)
+          : null
+      );
+      setEquipment(
+        Array.isArray(staff['equipment'])
+          ? (staff['equipment'] as string[])
+          : []
+      );
+      setPets(
+        Array.isArray(staff['pets']) ? (staff['pets'] as string[]) : []
+      );
+      setServices(
+        Array.isArray(staff['services'])
+          ? (staff['services'] as string[])
+          : []
+      );
+      setTeamJobs(
+        typeof staff['teamJobs'] === 'boolean'
+          ? (staff['teamJobs'] as boolean)
+          : null
+      );
+      setRightToWorkUk(staff['rightToWorkUk'] === true);
+      setDateOfBirth(
+        typeof staff['dateOfBirth'] === 'string'
+          ? (staff['dateOfBirth'] as string)
+          : ''
+      );
+      setBankAccountName(
+        (staff['bankAccountName'] as string | null) ?? ''
+      );
+      setBankName((staff['bankName'] as string | null) ?? '');
+      setBankSortCode(
+        (staff['bankSortCode'] as string | null) ?? ''
+      );
+      setBankAccountNumber(
+        (staff['bankAccountNumber'] as string | null) ?? ''
+      );
+  
+      // 2) Simple "is step missing" check using RAW doc values
+      //    (don’t auto-default here – we want null/undefined to count as missing)
+      const requiredSteps = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13] as const;
+  
+      const isStepMissing = (s: number): boolean => {
+        switch (s) {
+          case 0: {
+            const v = String(staff['homePostcode'] ?? '').trim();
+            return !v;
+          }
+          case 1: {
+            const raw = staff['radiusMiles'];
+            if (raw === null || raw === undefined) return true;
+            const v = Number(raw);
+            return !Number.isFinite(v) || v <= 0 || v > 50;
+          }
+          case 2: {
+            const raw = staff['minNoticeHours'];
+            if (raw === null || raw === undefined) return true; // <- this catches your null case
+            const v = Number(raw);
+            return !Number.isFinite(v) || v < 0 || v > 168;
+          }
+          case 3: {
+            const raw = staff['travelBufferMins'];
+            if (raw === null || raw === undefined) return true;
+            const v = Number(raw);
+            return ![0, 15, 30, 45, 60, 90].includes(v);
+          }
+          case 4:
+            return !staff['availability'];
+  
+          case 5:
+            return typeof staff['hasCar'] !== 'boolean';
+  
+          case 6:
+            return typeof staff['bringsSupplies'] !== 'boolean';
+  
+          case 7:
+            if (staff['bringsSupplies'] === true) {
+              const eq = staff['equipment'];
+              return (
+                !Array.isArray(eq) || (eq as unknown[]).length === 0
+              );
+            }
+            // if they don't bring supplies, nothing extra required
+            return false;
+  
+          // step 8 (pets) is intentionally NOT required
+  
+          case 9: {
+            const sv = staff['services'];
+            return !Array.isArray(sv) || (sv as unknown[]).length === 0;
+          }
+  
+          case 10:
+            return typeof staff['teamJobs'] !== 'boolean';
+  
+          case 11:
+            return staff['rightToWorkUk'] !== true;
+  
+          case 12:
+            return !staff['dateOfBirth'];
+  
+          case 13:
+            return (
+              !staff['bankAccountName'] ||
+              !staff['bankName'] ||
+              !staff['bankSortCode'] ||
+              !staff['bankAccountNumber']
+            );
+  
+          default:
+            return false;
+        }
+      };
+  
+      const missingSteps = requiredSteps.filter(isStepMissing);
+      const hasMissing = missingSteps.length > 0;
+  
+      setNeedsProfile(hasMissing);
+  
+      if (hasMissing) {
+        // start wizard at earliest missing step, e.g. 3 if 3,6,10 are missing
+        setStep(missingSteps[0]);
+      } else {
+        setStep(0);
+      }
     } catch {
+      // no staff doc or error -> treat everything as missing
       setNeedsProfile(true);
+      setStep(0);
     } finally {
       setCheckedProfile(true);
     }
   }, []);
+  
 
   useEffect(() => {
     if (!uid) {

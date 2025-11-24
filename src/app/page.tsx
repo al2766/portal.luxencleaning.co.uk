@@ -17,6 +17,8 @@ import Finances from './components/Finances';
 import Bookings from './components/Bookings'; // ✅ NEW
 import Postcodes from './components/Postcodes'; // ✅ NEW
 import Settings from './components/Settings'; // ✅ NEW
+import Payroll from './components/Payroll';
+
 
 const ADMIN_EMAIL = 'luxencleaninguk@gmail.com';
 
@@ -28,6 +30,7 @@ type Tab =
   | 'finances'
   | 'bookings'
   | 'postcodes'
+  | 'payroll'
   | 'settings'; // ✅ NEW tabs
 
 export default function StaffPage() {
@@ -59,7 +62,7 @@ export default function StaffPage() {
       setUser({ uid: u.uid, email: u.email });
 
       try {
-        const snap = await getDoc(doc(db, 'users', u.uid));
+        const snap = await getDoc(doc(db, 'staff', u.uid));
         const full =
           (snap.exists() && (snap.data() as any).name) ||
           u.displayName ||
@@ -81,7 +84,7 @@ export default function StaffPage() {
   useEffect(() => {
     if (
       !isAdmin &&
-      ['create', 'staff', 'finances', 'bookings', 'postcodes', 'settings'].includes(tab)
+      ['create', 'staff', 'finances', 'bookings', 'postcodes', 'payroll', 'settings'].includes(tab)
     )
       setTab('jobs');
   }, [isAdmin, tab]);
@@ -91,7 +94,7 @@ export default function StaffPage() {
   // ------- Tabs -------
   const tabs: Tab[] = (['jobs', 'profile'] as Tab[]).concat(
     isAdmin
-      ? (['create', 'staff', 'finances', 'bookings', 'postcodes', 'settings'] as Tab[])
+      ? (['create', 'staff', 'finances', 'bookings', 'postcodes', 'payroll', 'settings'] as Tab[])
       : []
   );
 
@@ -152,6 +155,8 @@ export default function StaffPage() {
                   ? 'Bookings'
                   : t === 'postcodes'
                   ? 'Postcodes'
+                   : t === 'payroll'
+                  ? 'Payroll'
                   : 'Settings'}
               </button>
             ))}
@@ -186,6 +191,12 @@ export default function StaffPage() {
         {tab === 'postcodes' &&
           (isAdmin ? (
             <Postcodes />
+          ) : (
+            <div className="text-red-600">Not authorized.</div>
+          ))}
+        {tab === 'payroll' &&
+          (isAdmin ? (
+            <Payroll />
           ) : (
             <div className="text-red-600">Not authorized.</div>
           ))}

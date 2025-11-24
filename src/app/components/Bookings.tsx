@@ -103,6 +103,8 @@ type BookingDoc = {
   assignedStaffId?: string | null;
   assignedStaffName?: string | null;
 
+  status?: 'completed' | 'refunded' | string;
+
   // NEW for two cleaners
   twoCleaners?: boolean;
   assignedStaffIds?: string[];
@@ -141,6 +143,22 @@ function formatShortDate(ymd?: string | null): string | null {
     })
     .toUpperCase(); // e.g. 29 NOV 25
 }
+
+  // Toggle between "paid" (status = completed) and "refunded"
+  const togglePaidStatus = async (job: Job) => {
+    const current = job.status as string | undefined;
+    const newStatus = current === 'refunded' ? 'completed' : 'refunded';
+
+    try {
+      await updateDoc(doc(db, 'bookings', job.id), {
+        status: newStatus,
+      });
+    } catch (e) {
+      console.error('Failed to update paid/refunded status', e);
+      alert('Failed to update status. See console for details.');
+    }
+  };
+
 
 function toE164UK(raw?: string | null): string | null {
   if (!raw) return null;
@@ -1600,8 +1618,8 @@ const cancelBooking = async (jobId: string) => {
         )}
       </section>
 
-      {/* Completed */}
-      <section>
+         {/* Completed */}
+         <section>
         <h2 className="text-xl font-semibold mb-3 text-gray-900">
           Completed Bookings
         </h2>
@@ -1632,9 +1650,23 @@ const cancelBooking = async (jobId: string) => {
                     </div>
 
                     <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-gray-700">
+                      {/* Always show "Completed" pill because this list is date-based */}
                       <span className="px-2 py-0.5 rounded-full border bg-gray-50 text-gray-700 border-gray-200 text-xs font-medium">
                         Completed
                       </span>
+
+                      {/* NEW: Paid / Refunded tags */}
+                      {j.status === 'completed' && (
+                        <span className="px-2 py-0.5 rounded-full border bg-green-50 text-green-700 border-green-200 text-xs font-medium">
+                          Paid
+                        </span>
+                      )}
+                      {j.status === 'refunded' && (
+                        <span className="px-2 py-0.5 rounded-full border bg-red-50 text-red-700 border-red-200 text-xs font-medium">
+                          Refunded
+                        </span>
+                      )}
+
                       <div>
                         <span className="font-medium">
                           {formatUKDate(j.date)}
@@ -1653,8 +1685,20 @@ const cancelBooking = async (jobId: string) => {
                     )}
                   </div>
 
-                  <div className="mt-3 md:mt-0 flex-shrink-0 flex flex-col items-end gap-2 min-w-[180px]">
-                    <div className="flex items-center gap-2">
+                  <div className="mt-3 md:mt-0 flex-shrink-0 flex flex-col items-end gap-2 min-w-[220px]">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {/* NEW: Paid / Refunded toggle button */}
+                      <button
+                        onClick={() => togglePaidStatus(j)}
+                        className={`cursor-pointer rounded-md px-3 py-2 text-sm border ${
+                          j.status === 'refunded'
+                            ? 'border-green-500 text-green-600 hover:bg-green-50'
+                            : 'border-red-500 text-red-600 hover:bg-red-50'
+                        }`}
+                      >
+                        {j.status === 'refunded' ? 'Paid' : 'Refunded'}
+                      </button>
+
                       <button
                         onClick={() => setRescheduleFor(j)}
                         className="cursor-pointer rounded-md bg-[#0071bc] px-3 py-2 text-white hover:opacity-95 text-sm"
@@ -1675,6 +1719,7 @@ const cancelBooking = async (jobId: string) => {
           </ul>
         )}
       </section>
+
 
       {/* Cancelled */}
       <section>

@@ -348,6 +348,50 @@ export default function Staff() {
               </div>
             </div>
 
+            <div className="rounded-xl border bg-white p-4 shadow-sm mb-4">
+  <h3 className="text-base font-semibold text-gray-900 mb-3">
+    Bank Information
+  </h3>
+
+  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+    <div>
+      <div className="text-xs text-gray-600 mb-0.5">Account holder</div>
+      <div className="text-sm text-gray-900">
+        {viewMember.bankAccountName || '—'}
+      </div>
+    </div>
+
+    <div>
+      <div className="text-xs text-gray-600 mb-0.5">Bank</div>
+      <div className="text-sm text-gray-900">
+        {viewMember.bankName || '—'}
+      </div>
+    </div>
+
+    <div>
+      <div className="text-xs text-gray-600 mb-0.5">Sort code</div>
+      <div className="text-sm text-gray-900">
+        {viewMember.bankSortCode || '—'}
+      </div>
+    </div>
+
+    <div>
+      <div className="text-xs text-gray-600 mb-0.5">Account number</div>
+      <div className="text-sm text-gray-900">
+        {viewMember.bankAccountNumber || '—'}
+      </div>
+    </div>
+  </div>
+
+  {viewMember.notes && (
+    <div className="mt-3">
+      <div className="text-xs text-gray-600 mb-0.5">Notes</div>
+      <div className="text-sm text-gray-900">{viewMember.notes}</div>
+    </div>
+  )}
+</div>
+
+
             {/* Legal */}
             <div className="rounded-xl border bg-white p-4 shadow-sm mb-4">
               <h3 className="text-base font-semibold text-gray-900 mb-3">Legal</h3>

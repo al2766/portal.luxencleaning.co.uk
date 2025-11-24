@@ -343,6 +343,8 @@ export default function Profile() {
   }
 
   const input = 'w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#0071bc]/30';
+  const readOnlyInput =
+  input + ' bg-gray-100 cursor-not-allowed focus:ring-0 text-gray-700';
 
   return (
     <div className="space-y-6">
@@ -350,10 +352,21 @@ export default function Profile() {
       <div className="rounded-xl border bg-white p-4 md:p-6 shadow-sm">
         <h2 className="text-lg font-semibold text-gray-900 mb-3">Profile</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div>
-            <label className="block text-base font-semibold text-gray-900 mb-0.5">Name</label>
-            <input className={input} placeholder="Full name" value={form.name} onChange={e=>setField('name', e.target.value)} />
-          </div>
+        <div>
+  <label className="block text-base font-semibold text-gray-900 mb-0.5">
+    Name
+  </label>
+  <input
+    className={readOnlyInput}
+    placeholder="Full name"
+    value={form.name}
+    readOnly
+    disabled
+  />
+  <p className="text-[11px] text-gray-500 mt-1">
+    Contact the office if your legal name changes.
+  </p>
+</div>
           <div>
             <label className="block text-base font-semibold text-gray-900 mb-0.5">Email</label>
             <input className={input} placeholder="Email" value={form.email} onChange={e=>setField('email', e.target.value)} />
@@ -363,54 +376,82 @@ export default function Profile() {
             <input className={input} placeholder="Phone" value={form.phone} onChange={e=>setField('phone', e.target.value)} />
           </div>
           <div>
-            <label className="block text-base font-semibold text-gray-900 mb-0.5">Date of Birth</label>
-            <input className={input} type="date" placeholder="DOB" value={form.dateOfBirth || ''} onChange={e=>setField('dateOfBirth', e.target.value)} />
-          </div>
+  <label className="block text-base font-semibold text-gray-900 mb-0.5">
+    Date of Birth
+  </label>
+  <input
+    className={readOnlyInput}
+    type="date"
+    placeholder="DOB"
+    value={form.dateOfBirth || ''}
+    readOnly
+    disabled
+  />
+  <p className="text-[11px] text-gray-500 mt-1">
+    Date of birth is locked once your profile is completed.
+  </p>
+</div>
         </div>
       </div>
 
-      {/* Bank details */}
       <div className="rounded-xl border bg-white p-4 md:p-6 shadow-sm">
-        <h2 className="text-lg font-semibold text-gray-900 mb-3">Bank Details</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div>
-            <label className="block text-base font-semibold text-gray-900 mb-0.5">Account holder name</label>
-            <input
-              className={input}
-              placeholder="Account holder name"
-              value={form.bankAccountName || ''}
-              onChange={e => setField('bankAccountName', e.target.value)}
-            />
-          </div>
-          <div>
-            <label className="block text-base font-semibold text-gray-900 mb-0.5">Bank name</label>
-            <input
-              className={input}
-              placeholder="Bank name"
-              value={form.bankName || ''}
-              onChange={e => setField('bankName', e.target.value)}
-            />
-          </div>
-          <div>
-            <label className="block text-base font-semibold text-gray-900 mb-0.5">Sort code</label>
-            <input
-              className={input}
-              placeholder="Sort code"
-              value={form.bankSortCode || ''}
-              onChange={e => setField('bankSortCode', e.target.value)}
-            />
-          </div>
-          <div>
-            <label className="block text-base font-semibold text-gray-900 mb-0.5">Account number</label>
-            <input
-              className={input}
-              placeholder="Account number"
-              value={form.bankAccountNumber || ''}
-              onChange={e => setField('bankAccountNumber', e.target.value)}
-            />
-          </div>
-        </div>
-      </div>
+  <h2 className="text-lg font-semibold text-gray-900 mb-1">Bank Details</h2>
+  <p className="text-xs text-gray-600 mb-3">
+    These details are locked once your profile is completed. If anything
+    changes, please contact the office.
+  </p>
+  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+    <div>
+      <label className="block text-base font-semibold text-gray-900 mb-0.5">
+        Account holder name
+      </label>
+      <input
+        className={readOnlyInput}
+        placeholder="Account holder name"
+        value={form.bankAccountName || ''}
+        readOnly
+        disabled
+      />
+    </div>
+    <div>
+      <label className="block text-base font-semibold text-gray-900 mb-0.5">
+        Bank name
+      </label>
+      <input
+        className={readOnlyInput}
+        placeholder="Bank name"
+        value={form.bankName || ''}
+        readOnly
+        disabled
+      />
+    </div>
+    <div>
+      <label className="block text-base font-semibold text-gray-900 mb-0.5">
+        Sort code
+      </label>
+      <input
+        className={readOnlyInput}
+        placeholder="Sort code"
+        value={form.bankSortCode || ''}
+        readOnly
+        disabled
+      />
+    </div>
+    <div>
+      <label className="block text-base font-semibold text-gray-900 mb-0.5">
+        Account number
+      </label>
+      <input
+        className={readOnlyInput}
+        placeholder="Account number"
+        value={form.bankAccountNumber || ''}
+        readOnly
+        disabled
+      />
+    </div>
+  </div>
+</div>
+
 
       {/* Ops settings */}
       <div className="rounded-xl border bg-white p-4 md:p-6 shadow-sm">
