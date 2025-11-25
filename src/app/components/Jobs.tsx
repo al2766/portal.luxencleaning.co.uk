@@ -23,7 +23,39 @@ import type {
   CircleProps,
 } from 'react-leaflet';
 
-const staffRate = 12.21; // £/hour
+function isWeekendYmd(ymd?: string | null): boolean {
+  if (!ymd) return false;
+  const [y, m, d] = ymd.split('-').map(Number);
+  if (!y || !m || !d) return false;
+  const dt = new Date(y, m - 1, d);
+  const day = dt.getDay(); // 0 = Sunday, 6 = Saturday
+  return day === 0 || day === 6;
+}
+
+
+const staffRate = 15; // default £/hour for standard jobs
+
+// Pay rules:
+// - Standard jobs:  £15 on weekdays, £17 on weekends
+// - Deep clean:     £21 on weekdays, £23 on weekends
+function getStaffRateForJob(job: {
+  serviceType?: string | null;
+  date?: string | null;
+}): number {
+  const st = (job.serviceType || '').toLowerCase();
+  const isWeekendJob = isWeekendYmd(job.date);
+  const isDeep = st.includes('deep');
+
+  if (isDeep) {
+    // Deep clean
+    return isWeekendJob ? 23 : 21;
+  }
+
+  // All other service types
+  return isWeekendJob ? 17 : 15;
+}
+
+
 
 const currency = new Intl.NumberFormat('en-GB', {
   style: 'currency',
@@ -991,9 +1023,9 @@ export default function Jobs() {
         const staffPhone = toE164UK(rawStaffPhone) ?? '';
 
         const estimatedHours = Number(data.estimatedHours ?? 0) || 0;
-        const staffPay = estimatedHours
-          ? estimatedHours * staffRate
-          : 0;
+        const rate = getStaffRateForJob(data);
+        const staffPay = estimatedHours ? estimatedHours * rate : 0;
+        
 
         const postcode =
           typeof data.address === 'string'
@@ -1086,10 +1118,10 @@ export default function Jobs() {
           ? job.address
           : ((job.address?.postcode as string | undefined) || '');
 
-      const estimatedHours = Number(job.estimatedHours ?? 0) || 0;
-      const staffPay = estimatedHours
-        ? estimatedHours * staffRate
-        : 0;
+          const estimatedHours = Number(job.estimatedHours ?? 0) || 0;
+          const rate = getStaffRateForJob(job);
+          const staffPay = estimatedHours ? estimatedHours * rate : 0;
+          
 
       const snippet = `Booking confirmed: ${
         job.customerName || 'Customer'
@@ -1166,7 +1198,7 @@ async function downloadChecklist(job: Job) {
 
   const BOX = 8;
 
-  const STAFF_RATE = staffRate;
+  const STAFF_RATE = getStaffRateForJob(job);
 
   const money = new Intl.NumberFormat('en-GB', {
     style: 'currency',
@@ -1569,8 +1601,10 @@ async function downloadChecklist(job: Job) {
 
   const payText = (j: Job) => {
     const hours = Number(j.estimatedHours ?? 0) || 0;
-    return hours ? currency.format(hours * staffRate) : '—';
+    const rate = getStaffRateForJob(j);
+    return hours ? currency.format(hours * rate) : '—';
   };
+  
 
   const twoCleanerLine = (j: Job): string | null => {
     if (!j.twoCleaners) return null;
@@ -2904,13 +2938,13 @@ async function downloadChecklist(job: Job) {
               Your Pay
             </div>
             <div className="text-sm text-gray-900">
-              {(() => {
-                const h = Number(viewJob.estimatedHours ?? 0) || 0;
-                return h
-                  ? `${currency.format(h * staffRate)}`
-                  : '—';
-              })()}
-            </div>
+  {(() => {
+    const h = Number(viewJob.estimatedHours ?? 0) || 0;
+    const rate = getStaffRateForJob(viewJob);
+    return h ? `${currency.format(h * rate)}` : '—';
+  })()}
+</div>
+
           </div>
         </div>
 
