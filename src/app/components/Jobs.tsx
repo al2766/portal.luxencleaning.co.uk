@@ -1059,6 +1059,7 @@ export default function Jobs() {
               trigger: 'booking_assigned',
               jobId,
               staffId: uid,
+              serviceType: data.serviceType,
               staffName: myName,
               staffEmail,
               staffPhone,

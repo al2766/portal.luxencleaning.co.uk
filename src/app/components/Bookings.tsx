@@ -144,6 +144,34 @@ function formatShortDate(ymd?: string | null): string | null {
     .toUpperCase(); // e.g. 29 NOV 25
 }
 
+function isWeekendYmd(ymd?: string | null): boolean {
+  if (!ymd) return false;
+  const [y, m, d] = ymd.split('-').map(Number);
+  if (!y || !m || !d) return false;
+  const dt = new Date(y, m - 1, d);
+  const day = dt.getDay(); // 0 = Sunday, 6 = Saturday
+  return day === 0 || day === 6;
+}
+
+// Same rules as jobs.tsx:
+// - Standard jobs:  £15 weekdays, £17 weekends
+// - Deep clean:     £21 weekdays, £23 weekends
+function getStaffRateForJob(job: {
+  serviceType?: string | null;
+  date?: string | null;
+}): number {
+  const st = (job.serviceType || '').toLowerCase();
+  const isWeekendJob = isWeekendYmd(job.date);
+  const isDeep = st.includes('deep');
+
+  if (isDeep) {
+    return isWeekendJob ? 23 : 21;
+  }
+
+  return isWeekendJob ? 17 : 15;
+}
+
+
   // Toggle between "paid" (status = completed) and "refunded"
   const togglePaidStatus = async (job: Job) => {
     const current = job.status as string | undefined;
@@ -185,7 +213,6 @@ function toE164UK(raw?: string | null): string | null {
   return '+' + digits;
 }
 
-const staffRate = 12.21; // £/hour
 
 const money = new Intl.NumberFormat('en-GB', {
   style: 'currency',
@@ -381,7 +408,7 @@ async function downloadChecklist(job: Job) {
 
   const BOX = 8;
 
-  const STAFF_RATE = staffRate;
+  const STAFF_RATE = getStaffRateForJob(job);
 
   const money = new Intl.NumberFormat('en-GB', {
     style: 'currency',
@@ -1134,10 +1161,12 @@ export default function Bookings() {
           ? job?.address || ''
           : job?.address?.postcode || '';
 
-      const staffPay =
-        job?.estimatedHours != null
-          ? (job.estimatedHours * 12.21).toFixed(2)
-          : '0.00';
+          const estimatedHours = Number(job?.estimatedHours ?? 0) || 0;
+      const rate = job ? getStaffRateForJob(job) : 0;
+      const staffPay = estimatedHours && rate
+        ? Number((estimatedHours * rate).toFixed(2))
+        : 0;
+
 
       const payload = {
         trigger: 'booking_assigned',
@@ -1149,6 +1178,7 @@ export default function Bookings() {
         twoCleaners: job?.twoCleaners ?? false,
         customerName: job?.customerName ?? null,
         postcode,
+        serviceType: job?.serviceType ?? null,   // 👈 NEW
         date: job?.date ?? null,
         prettyDate: formatShortDate(job?.date ?? null),
         time: job?.displayTime || job?.startTime || null,
@@ -1203,10 +1233,12 @@ export default function Bookings() {
           ? job?.address || ''
           : job?.address?.postcode || '';
 
-      const staffPay =
-        job?.estimatedHours != null
-          ? (job.estimatedHours * 12.21).toFixed(2)
-          : '0.00';
+          const estimatedHours = Number(job?.estimatedHours ?? 0) || 0;
+      const rate = job ? getStaffRateForJob(job) : 0;
+      const staffPay = estimatedHours && rate
+        ? Number((estimatedHours * rate).toFixed(2))
+        : 0;
+
 
       const payload = {
         trigger: 'booking_assigned',
@@ -1223,6 +1255,7 @@ export default function Bookings() {
         time: job?.displayTime || job?.startTime || null,
         estimatedHours: job?.estimatedHours ?? null,
         totalPrice: job?.totalPrice ?? null,
+        serviceType: job?.serviceType ?? null,   // 👈 NEW
         staffPay,
       };
 
@@ -1300,6 +1333,7 @@ const cancelBooking = async (jobId: string) => {
           postcode,
           staffIds: assignedIds,
           staffNames: assignedNames,
+          serviceType: job?.serviceType ?? null,   // 👈 NEW
           staffEmails: assignedStaffRows.map((s) => s?.email ?? null),
           staffPhones: assignedStaffRows.map((s) =>
             toE164UK(s?.phone ?? null)
